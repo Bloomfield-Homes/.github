@@ -1,0 +1,51 @@
+name: Bug
+description: Something is broken or behaves wrongly.
+labels: [bug]
+body:
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One line.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Repro steps
+      description: Numbered steps.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected vs actual
+      placeholder: |
+        Expected:
+        Actual:
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Browser, build or version, and environment (dev, staging, production).
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - 1 - Critical
+        - 2 - High
+        - 3 - Medium
+        - 4 - Low
+      default: 2
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: Do not paste credentials or buyer personal information.
