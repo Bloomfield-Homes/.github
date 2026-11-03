@@ -1,0 +1,43 @@
+name: Feature
+description: A new capability or change.
+labels: [enhancement]
+body:
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: One line.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: What and why, with any context.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Verifiable outcomes as a checklist.
+      placeholder: |
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - 1 - Must
+        - 2
+        - 3
+        - 4
+      default: 2
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: Do not paste credentials or buyer personal information.
