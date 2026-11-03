@@ -20,4 +20,4 @@
 
 ## Linked issue
 
-<!-- Closes #123 or the work item ID. -->
+<!-- Closes #123 -->
