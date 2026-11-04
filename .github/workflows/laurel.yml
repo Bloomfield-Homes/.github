@@ -30,7 +30,9 @@ jobs:
       (github.event_name == 'pull_request_review' && github.event.sender.type == 'User' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         contains(github.event.review.body, '@laurel'))
-    runs-on: [self-hosted, laurel]
+    runs-on:
+      group: laurel
+      labels: [self-hosted, laurel]
     timeout-minutes: 60
     concurrency:
       group: laurel-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number }}
@@ -66,9 +68,37 @@ jobs:
           app-id: ${{ vars.LAUREL_APP_ID }}
           private-key: ${{ secrets.LAUREL_APP_PRIVATE_KEY }}
 
+      - name: Authorize actor
+        id: auth
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const { data: user } = await github.rest.users.getByUsername({ username: context.actor });
+            const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
+              ...context.repo, username: context.actor,
+            });
+            if (user.type !== 'User' || !['admin', 'write'].includes(perm.permission)) {
+              core.setOutput('ok', 'false');
+              core.notice(`${context.actor} is ${user.type} with ${perm.permission} access; Laurel needs a person with write access.`);
+              return;
+            }
+            if (context.payload.issue && context.payload.issue.pull_request) {
+              const { data: pr } = await github.rest.pulls.get({
+                owner, repo, pull_number: context.payload.issue.number,
+              });
+              if (!pr.head.repo || pr.head.repo.full_name !== `${owner}/${repo}`) {
+                core.setOutput('ok', 'false');
+                core.notice('Laurel only supports pull requests from this repository.');
+                return;
+              }
+            }
+            core.setOutput('ok', 'true');
+
       - name: Require acceptance criteria
         id: gate
-        if: github.event_name == 'issues' || (github.event_name == 'issue_comment' && !github.event.issue.pull_request)
+        if: steps.auth.outputs.ok == 'true' && (github.event_name == 'issues' || (github.event_name == 'issue_comment' && !github.event.issue.pull_request))
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           github-token: ${{ steps.app.outputs.token }}
@@ -80,7 +110,8 @@ jobs:
             if (start >= 0) {
               for (const l of lines.slice(start + 1)) {
                 if (/^\s*#{1,6}\s/.test(l)) break;
-                if (/^\s*[-*]\s+(\[[ xX]\]\s+)?\S/.test(l)) count += 1;
+                const bullet = l.match(/^\s*[-*]\s+(.+)$/);
+                if (bullet && bullet[1].replace(/^\[[ xX]\](?:\s+|$)/, '').trim()) count += 1;
               }
             }
             if (count >= 2) {
@@ -102,7 +133,7 @@ jobs:
             }
 
       - name: Check out repository
-        if: steps.gate.outputs.ok != 'false'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           token: ${{ steps.app.outputs.token }}
@@ -110,7 +141,7 @@ jobs:
 
       - name: Run Laurel
         id: laurel
-        if: steps.gate.outputs.ok != 'false'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false')
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         with:
           github_token: ${{ steps.app.outputs.token }}
@@ -124,11 +155,11 @@ jobs:
           claude_args: >-
             --model local
             --max-turns 40
-            --allowedTools "Edit,MultiEdit,Write,Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
+            --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
             --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
 
       - name: Enforce small PRs and open the PR
-        if: steps.laurel.outputs.conclusion == 'success'
+        if: steps.auth.outputs.ok == 'true' && (steps.laurel.outputs.conclusion == 'success')
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           LAUREL_BRANCH: ${{ steps.laurel.outputs.branch_name }}
