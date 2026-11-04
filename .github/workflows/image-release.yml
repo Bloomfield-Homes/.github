@@ -1,10 +1,15 @@
 name: Image release
 
-# Reusable. Callers run it after a release is cut and pass `secrets: inherit`.
-# Dokploy base URLs and deploy IDs come from `vars`, API keys from `secrets`.
+# Reusable. Callers run it after a release is cut, pass `secrets: inherit`,
+# and pass `vars: ${{ toJSON(vars) }}` so Dokploy URLs and IDs resolve in the
+# caller's repo and org.
 on:
   workflow_call:
     inputs:
+      vars:
+        description: The caller's vars context, as toJSON(vars)
+        type: string
+        required: true
       image:
         description: Package name, pushed as ghcr.io/bloomfield-homes/<image>
         type: string
@@ -92,13 +97,13 @@ jobs:
         env:
           APP_TYPE: ${{ inputs.app-type }}
           CHANNEL: ${{ inputs.channel }}
-          AZURE_URL: ${{ vars.DOKPLOY_AZURE_URL }}
-          ONPREM_URL: ${{ vars.DOKPLOY_ONPREM_URL }}
+          AZURE_URL: ${{ fromJSON(inputs.vars).DOKPLOY_AZURE_URL }}
+          ONPREM_URL: ${{ fromJSON(inputs.vars).DOKPLOY_ONPREM_URL }}
           AZURE_KEY: ${{ secrets.DOKPLOY_AZURE_API_KEY }}
           ONPREM_KEY: ${{ secrets.DOKPLOY_ONPREM_API_KEY }}
-          PROD_ID: ${{ vars.DOKPLOY_PROD_ID }}
-          STANDBY_ID: ${{ vars.DOKPLOY_STANDBY_ID }}
-          STAGING_ID: ${{ vars.DOKPLOY_STAGING_ID }}
+          PROD_ID: ${{ fromJSON(inputs.vars).DOKPLOY_PROD_ID }}
+          STANDBY_ID: ${{ fromJSON(inputs.vars).DOKPLOY_STANDBY_ID }}
+          STAGING_ID: ${{ fromJSON(inputs.vars).DOKPLOY_STAGING_ID }}
         run: |
           case "$APP_TYPE" in
             compose) id_field=composeId ;;

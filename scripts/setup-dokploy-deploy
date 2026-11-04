@@ -24,11 +24,20 @@ command -v gh >/dev/null || { echo "gh is required" >&2; exit 1; }
 done_items=()
 skipped=()
 
+# Repos already granted an org secret or variable, plus $repo. Setting a value
+# with --repos replaces the list, so a rotation must carry the existing grants.
+access_list() {
+  local kind="$1" name="$2" existing
+  existing="$(gh api "orgs/$ORG/actions/$kind/$name/repositories" \
+    --jq '[.repositories[].name] | join(",")' 2>/dev/null || true)"
+  if [ -n "$existing" ]; then echo "$existing,$repo"; else echo "$repo"; fi
+}
+
 if $set_org; then
   for name in "${VARS[@]}"; do
     read -rp "$name: " value
     if [ -n "$value" ]; then
-      gh variable set "$name" --org "$ORG" --visibility selected --repos "$repo" --body "$value"
+      gh variable set "$name" --org "$ORG" --visibility selected --repos "$(access_list variables "$name")" --body "$value"
       done_items+=("org variable $name")
     else
       skipped+=("org variable $name")
@@ -38,7 +47,7 @@ if $set_org; then
     read -rsp "$name (hidden): " value
     echo
     if [ -n "$value" ]; then
-      printf '%s' "$value" | gh secret set "$name" --org "$ORG" --visibility selected --repos "$repo"
+      printf '%s' "$value" | gh secret set "$name" --org "$ORG" --visibility selected --repos "$(access_list secrets "$name")"
       done_items+=("org secret $name")
     else
       skipped+=("org secret $name")

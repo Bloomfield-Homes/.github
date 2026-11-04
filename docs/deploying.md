@@ -24,6 +24,7 @@ Add this job to the repo's release workflow, after the job named `release` that 
       packages: write
     uses: Bloomfield-Homes/.github/.github/workflows/image-release.yml@main
     with:
+      vars: ${{ toJSON(vars) }}
       image: my-app
       sha: ${{ needs.release.outputs.sha }}
       version: ${{ needs.release.outputs.version }}
@@ -36,6 +37,8 @@ Add this job to the repo's release workflow, after the job named `release` that 
       # parity-expect: ${{ needs.release.outputs.sha }}
     secrets: inherit
 ```
+
+`vars` hands the caller's repo and org variables to the workflow, which lives in this repo and would not otherwise see them.
 
 ## Configuration
 
