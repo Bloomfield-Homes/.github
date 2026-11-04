@@ -28,8 +28,12 @@ skipped=()
 # with --repos replaces the list, so a rotation must carry the existing grants.
 access_list() {
   local kind="$1" name="$2" existing
-  existing="$(gh api "orgs/$ORG/actions/$kind/$name/repositories" \
-    --jq '[.repositories[].name] | join(",")' 2>/dev/null || true)"
+
+  # A new name 404s, and gh prints the error body to stdout.
+  if ! existing="$(gh api "orgs/$ORG/actions/$kind/$name/repositories" \
+      --jq '[.repositories[].name] | join(",")' 2>/dev/null)"; then
+    existing=""
+  fi
   if [ -n "$existing" ]; then echo "$existing,$repo"; else echo "$repo"; fi
 }
 
