@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Onboard a repo to the org image-release workflow.
+#   scripts/setup-dokploy-deploy <repo> [--org]
+set -euo pipefail
+
+ORG="Bloomfield-Homes"
+SECRETS=(DOKPLOY_AZURE_API_KEY DOKPLOY_ONPREM_API_KEY)
+VARS=(DOKPLOY_AZURE_URL DOKPLOY_ONPREM_URL)
+
+usage() { echo "usage: $0 <repo> [--org]" >&2; exit 2; }
+
+repo=""
+set_org=false
+for arg in "$@"; do
+  case "$arg" in
+    --org) set_org=true ;;
+    -*) usage ;;
+    *) if [ -z "$repo" ]; then repo="$arg"; else usage; fi ;;
+  esac
+done
+[ -n "$repo" ] || usage
+command -v gh >/dev/null || { echo "gh is required" >&2; exit 1; }
+
+done_items=()
+skipped=()
+
+# Repos already granted an org secret or variable, plus $repo. Setting a value
+# with --repos replaces the list, so a rotation must carry the existing grants.
+access_list() {
+  local kind="$1" name="$2" existing
+  existing="$(gh api "orgs/$ORG/actions/$kind/$name/repositories" \
+    --jq '[.repositories[].name] | join(",")' 2>/dev/null || true)"
+  if [ -n "$existing" ]; then echo "$existing,$repo"; else echo "$repo"; fi
+}
+
+if $set_org; then
+  for name in "${VARS[@]}"; do
+    read -rp "$name: " value
+    if [ -n "$value" ]; then
+      gh variable set "$name" --org "$ORG" --visibility selected --repos "$(access_list variables "$name")" --body "$value"
+      done_items+=("org variable $name")
+    else
+      skipped+=("org variable $name")
+    fi
+  done
+  for name in "${SECRETS[@]}"; do
+    read -rsp "$name (hidden): " value
+    echo
+    if [ -n "$value" ]; then
+      printf '%s' "$value" | gh secret set "$name" --org "$ORG" --visibility selected --repos "$(access_list secrets "$name")"
+      done_items+=("org secret $name")
+    else
+      skipped+=("org secret $name")
+    fi
+    value=""
+  done
+fi
+
+repo_id="$(gh api "repos/$ORG/$repo" --jq .id)"
+
+for name in "${SECRETS[@]}"; do
+  gh api -X PUT "orgs/$ORG/actions/secrets/$name/repositories/$repo_id" --silent
+  done_items+=("granted $repo org secret $name")
+done
+for name in "${VARS[@]}"; do
+  gh api -X PUT "orgs/$ORG/actions/variables/$name/repositories/$repo_id" --silent
+  done_items+=("granted $repo org variable $name")
+done
+
+for name in DOKPLOY_PROD_ID DOKPLOY_STANDBY_ID DOKPLOY_STAGING_ID; do
+  read -rp "$name (blank to skip): " value
+  if [ -n "$value" ]; then
+    gh variable set "$name" --repo "$ORG/$repo" --body "$value"
+    done_items+=("repo variable $name")
+  else
+    skipped+=("repo variable $name")
+  fi
+done
+
+echo
+echo "Set:"
+printf '  %s\n' "${done_items[@]}"
+if [ "${#skipped[@]}" -gt 0 ]; then
+  echo "Skipped:"
+  printf '  %s\n' "${skipped[@]}"
+fi
+cat <<'MSG'
+
+Remaining manual steps (see docs/deploying.md):
+  1. In each Dokploy, create a github-deploy member limited to the app's project and generate its API key.
+  2. In each Dokploy, add a GHCR registry (a PAT with read:packages).
+  3. Switch each app to the Docker image ghcr.io/bloomfield-homes/<image>:production or :staging.
+  4. Add the caller job to the repo's release workflow.
+MSG

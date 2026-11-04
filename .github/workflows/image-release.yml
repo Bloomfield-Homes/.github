@@ -1,0 +1,156 @@
+name: Image release
+
+# Reusable. Callers run it after a release is cut, pass `secrets: inherit`,
+# and pass `vars: ${{ toJSON(vars) }}` so Dokploy URLs and IDs resolve in the
+# caller's repo and org.
+on:
+  workflow_call:
+    inputs:
+      vars:
+        description: The caller's vars context, as toJSON(vars)
+        type: string
+        required: true
+      image:
+        description: Package name, pushed as ghcr.io/bloomfield-homes/<image>
+        type: string
+        required: true
+      sha:
+        description: Commit to check out and build
+        type: string
+        required: true
+      version:
+        description: Release version
+        type: string
+        required: true
+      channel:
+        description: production or staging
+        type: string
+        required: true
+      app-type:
+        description: Dokploy resource kind, compose or application
+        type: string
+        required: true
+      build-args:
+        description: Multiline KEY=value build args
+        type: string
+        required: false
+        default: ""
+      parity-url:
+        description: URL polled after a production deploy
+        type: string
+        required: false
+        default: ""
+      parity-field:
+        description: JSON field read with jq
+        type: string
+        required: false
+        default: commit
+      parity-expect:
+        description: Value the parity field must reach
+        type: string
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute short sha
+        id: meta
+        env:
+          SHA: ${{ inputs.sha }}
+        run: echo "short=${SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          build-args: |
+            ${{ inputs.build-args }}
+            SOURCE_COMMIT=${{ inputs.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          tags: |
+            ghcr.io/bloomfield-homes/${{ inputs.image }}:${{ inputs.version }}
+            ghcr.io/bloomfield-homes/${{ inputs.image }}:sha-${{ steps.meta.outputs.short }}
+            ghcr.io/bloomfield-homes/${{ inputs.image }}:${{ inputs.channel }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy via Dokploy API
+        env:
+          APP_TYPE: ${{ inputs.app-type }}
+          CHANNEL: ${{ inputs.channel }}
+          AZURE_URL: ${{ fromJSON(inputs.vars).DOKPLOY_AZURE_URL }}
+          ONPREM_URL: ${{ fromJSON(inputs.vars).DOKPLOY_ONPREM_URL }}
+          AZURE_KEY: ${{ secrets.DOKPLOY_AZURE_API_KEY }}
+          ONPREM_KEY: ${{ secrets.DOKPLOY_ONPREM_API_KEY }}
+          PROD_ID: ${{ fromJSON(inputs.vars).DOKPLOY_PROD_ID }}
+          STANDBY_ID: ${{ fromJSON(inputs.vars).DOKPLOY_STANDBY_ID }}
+          STAGING_ID: ${{ fromJSON(inputs.vars).DOKPLOY_STAGING_ID }}
+        run: |
+          case "$APP_TYPE" in
+            compose) id_field=composeId ;;
+            application) id_field=applicationId ;;
+            *) echo "::error::app-type must be compose or application"; exit 1 ;;
+          esac
+
+          deploy() {
+            local name="$1" base="$2" key="$3" id="$4" body code
+            if [ -z "$id" ] || [ -z "$base" ] || [ -z "$key" ]; then
+              echo "::notice::$name is not fully configured (id, url or key empty); skipping"
+              return 0
+            fi
+            body="$(jq -cn --arg f "$id_field" --arg id "$id" '{($f): $id}')"
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST --max-time 60 \
+              -H 'Content-Type: application/json' \
+              -H "x-api-key: $key" \
+              -d "$body" \
+              "${base%/}/api/${APP_TYPE}.deploy")" || code=000
+            if [[ "$code" != 2* ]]; then
+              echo "::error::$name deploy returned HTTP $code"
+              return 1
+            fi
+            echo "$name deploy triggered (HTTP $code)"
+          }
+
+          if [ "$CHANNEL" = "production" ]; then
+            deploy production "$AZURE_URL" "$AZURE_KEY" "$PROD_ID"
+            deploy standby "$ONPREM_URL" "$ONPREM_KEY" "$STANDBY_ID"
+          else
+            deploy staging "$AZURE_URL" "$AZURE_KEY" "$STAGING_ID"
+          fi
+
+      - name: Verify production runs the release
+        if: inputs.channel == 'production' && inputs.parity-url != ''
+        env:
+          URL: ${{ inputs.parity-url }}
+          FIELD: ${{ inputs.parity-field }}
+          EXPECTED: ${{ inputs.parity-expect }}
+        run: |
+          for _ in $(seq 1 30); do
+            value="$(curl -fsS --max-time 10 "$URL" 2>/dev/null | jq -r --arg f "$FIELD" '.[$f] // empty' || true)"
+            if [ "$value" = "$EXPECTED" ]; then
+              echo "Production reports $FIELD=$EXPECTED"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::Production did not report $FIELD=$EXPECTED within 5 minutes (last: ${value:-none})"
+          exit 1
