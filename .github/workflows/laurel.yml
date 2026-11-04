@@ -1,0 +1,199 @@
+# Laurel: Bloomfield Homes coding agent. Repos opt in with one caller workflow. The model is the gateway
+# `local` alias only. Plan: vault Local-Cowork/Plans/2026-11-04-laurel-github-claude-code-action.md
+name: Laurel
+
+on:
+  workflow_call:
+    secrets:
+      LAUREL_APP_PRIVATE_KEY:
+        required: true
+      LAUREL_GATEWAY_KEY:
+        required: true
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  laurel:
+    # Label trigger, or a person's @laurel mention on an issue, any PR conversation, or any PR review.
+    # Review triggers skip fork PRs. The action itself also refuses actors without write access and all bots,
+    # so Copilot's comments are acted on only when a person asks.
+    if: >-
+      (github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'laurel') ||
+      (github.event_name == 'issue_comment' && github.event.sender.type == 'User' &&
+        contains(github.event.comment.body, '@laurel')) ||
+      (github.event_name == 'pull_request_review_comment' && github.event.sender.type == 'User' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(github.event.comment.body, '@laurel')) ||
+      (github.event_name == 'pull_request_review' && github.event.sender.type == 'User' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(github.event.review.body, '@laurel'))
+    runs-on: [self-hosted, laurel]
+    timeout-minutes: 60
+    concurrency:
+      group: laurel-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number }}
+      cancel-in-progress: false
+    env:
+      # Every model name Claude Code reads is the gateway alias, so nothing asks for a Claude model.
+      ANTHROPIC_BASE_URL: ${{ vars.LAUREL_GATEWAY_URL }}
+      ANTHROPIC_MODEL: local
+      ANTHROPIC_DEFAULT_OPUS_MODEL: local
+      ANTHROPIC_DEFAULT_SONNET_MODEL: local
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: local
+      ANTHROPIC_SMALL_FAST_MODEL: local
+      CLAUDE_CODE_SUBAGENT_MODEL: local
+      # Egress off: telemetry, error reports, updates, feedback, feature flags, web fetch, connectors.
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+      DISABLE_TELEMETRY: '1'
+      DISABLE_ERROR_REPORTING: '1'
+      DISABLE_AUTOUPDATER: '1'
+      DISABLE_FEEDBACK_COMMAND: '1'
+      DO_NOT_TRACK: '1'
+      CLAUDE_CODE_DISABLE_WEB_FETCH: '1'
+      CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: '1'
+      CLAUDE_CODE_DISABLE_ARTIFACT: '1'
+      ENABLE_CLAUDEAI_MCP_SERVERS: 'false'
+      # The local model is not Anthropic: no beta headers, no prompt-cache marks.
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1'
+      DISABLE_PROMPT_CACHING: '1'
+    steps:
+      - name: Mint Laurel installation token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.LAUREL_APP_ID }}
+          private-key: ${{ secrets.LAUREL_APP_PRIVATE_KEY }}
+
+      - name: Require acceptance criteria
+        id: gate
+        if: github.event_name == 'issues' || (github.event_name == 'issue_comment' && !github.event.issue.pull_request)
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const issue = context.payload.issue;
+            const lines = (issue.body || '').split(/\r?\n/);
+            const start = lines.findIndex((l) => /^\s*(#{1,6}\s*|\*\*)?acceptance criteria\b/i.test(l));
+            let count = 0;
+            if (start >= 0) {
+              for (const l of lines.slice(start + 1)) {
+                if (/^\s*#{1,6}\s/.test(l)) break;
+                if (/^\s*[-*]\s+(\[[ xX]\]\s+)?\S/.test(l)) count += 1;
+              }
+            }
+            if (count >= 2) {
+              core.setOutput('ok', 'true');
+              return;
+            }
+            core.setOutput('ok', 'false');
+            const { owner, repo } = context.repo;
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: issue.number,
+              body: 'Laurel needs at least 2 acceptance criteria bullets before it starts. ' +
+                `I found ${count}. Add an "Acceptance criteria" section to the issue with one verifiable ` +
+                'outcome per bullet, then add the `laurel` label again.',
+            });
+            try {
+              await github.rest.issues.removeLabel({ owner, repo, issue_number: issue.number, name: 'laurel' });
+            } catch (e) {
+              core.info(`label not removed: ${e.message}`);
+            }
+
+      - name: Check out repository
+        if: steps.gate.outputs.ok != 'false'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.app.outputs.token }}
+          fetch-depth: 1
+
+      - name: Run Laurel
+        id: laurel
+        if: steps.gate.outputs.ok != 'false'
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        with:
+          github_token: ${{ steps.app.outputs.token }}
+          anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
+          trigger_phrase: '@laurel'
+          label_trigger: laurel
+          branch_prefix: laurel/
+          bot_name: bloomfield-laurel[bot]
+          bot_id: '352642980'
+          settings: '{"permissions":{"deny":["WebFetch","WebSearch"]}}'
+          claude_args: >-
+            --model local
+            --max-turns 40
+            --allowedTools "Edit,MultiEdit,Write,Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
+            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
+
+      - name: Enforce small PRs and open the PR
+        if: steps.laurel.outputs.conclusion == 'success'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          LAUREL_BRANCH: ${{ steps.laurel.outputs.branch_name }}
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const MAX_LINES = 300;
+            const MAX_FILES = 10;
+            const { owner, repo } = context.repo;
+            const number = (context.payload.issue || context.payload.pull_request).number;
+            const isPr = Boolean(context.payload.pull_request || (context.payload.issue && context.payload.issue.pull_request));
+            // On an existing PR, Laurel commits review fixes to that branch; the gate would measure the
+            // whole PR, not Laurel's change, so it only guards new PRs opened from issues.
+            if (isPr) {
+              core.notice('Review fixes on an existing PR; size gate applies to new PRs only.');
+              return;
+            }
+            const head = process.env.LAUREL_BRANCH;
+            const base = context.payload.repository.default_branch;
+            if (!head) {
+              core.notice('Laurel produced no branch; nothing to check.');
+              return;
+            }
+            const { data: cmp } = await github.rest.repos.compareCommitsWithBasehead({
+              owner, repo, basehead: `${base}...${head}`, per_page: 100,
+            });
+            if (cmp.ahead_by === 0) {
+              core.notice('No commits on the Laurel branch; nothing to check.');
+              return;
+            }
+            const files = cmp.files || [];
+            const lines = files.reduce((n, f) => n + f.additions + f.deletions, 0);
+            if (lines > MAX_LINES || files.length > MAX_FILES) {
+              const byDir = {};
+              for (const f of files) {
+                const dir = f.filename.includes('/') ? f.filename.split('/').slice(0, 2).join('/') : '(root)';
+                byDir[dir] = (byDir[dir] || 0) + f.additions + f.deletions;
+              }
+              const split = Object.entries(byDir).sort((a, b) => b[1] - a[1])
+                .map(([dir, n]) => `- \`${dir}\`: ${n} lines`).join('\n');
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: number,
+                body: `Laurel's change is ${lines} changed lines in ${files.length} files. The limit is ` +
+                  `${MAX_LINES} lines and ${MAX_FILES} files, so I did not open a PR for review as is. ` +
+                  `The work is on branch \`${head}\`. Proposed split, one issue per group:\n${split}`,
+              });
+              if (!isPr) {
+                try {
+                  await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name: 'laurel' });
+                } catch (e) {
+                  core.info(`label not removed: ${e.message}`);
+                }
+              }
+              return;
+            }
+            if (isPr) return;
+            const { data: open } = await github.rest.pulls.list({ owner, repo, head: `${owner}:${head}`, state: 'open' });
+            if (open.length > 0) return;
+            const issue = context.payload.issue;
+            const { data: pr } = await github.rest.pulls.create({
+              owner, repo, head, base,
+              title: `Laurel: ${issue.title}`.slice(0, 120),
+              body: `Closes #${issue.number}\n\nWritten by Laurel on the local model. A person must review and merge; Laurel never merges.`,
+            });
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: issue.number,
+              body: `Laurel opened ${pr.html_url} (${lines} changed lines, ${files.length} files). It needs human review.`,
+            });
