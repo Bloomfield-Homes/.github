@@ -155,8 +155,21 @@ jobs:
           claude_args: >-
             --model local
             --max-turns 40
-            --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git push origin HEAD),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
-            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer, then push the branch with git push origin HEAD. Never push to the default branch. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
+            --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
+            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer, The workflow pushes your branch after you finish; do not push. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
+
+      - name: Push Laurel's branch
+        if: steps.auth.outputs.ok == 'true' && (steps.laurel.outputs.conclusion == 'success')
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          branch="$(git rev-parse --abbrev-ref HEAD)"
+          # Never write to the default branch, even if the agent switched to it.
+          if [ "$branch" = "$DEFAULT_BRANCH" ] || [ "$branch" = "HEAD" ]; then
+            echo "::warning::Laurel is on '$branch'; not pushing."
+            exit 0
+          fi
+          git push origin "HEAD:refs/heads/$branch"
 
       - name: Enforce small PRs and open the PR
         if: steps.auth.outputs.ok == 'true' && (steps.laurel.outputs.conclusion == 'success')
