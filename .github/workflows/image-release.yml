@@ -130,12 +130,16 @@ jobs:
             echo "$name deploy triggered (HTTP $code)"
           }
 
+          # Attempt every target, then fail if any did, so a production
+          # failure never leaves the standby on the previous release.
+          failed=0
           if [ "$CHANNEL" = "production" ]; then
-            deploy production "$AZURE_URL" "$AZURE_KEY" "$PROD_ID"
-            deploy standby "$ONPREM_URL" "$ONPREM_KEY" "$STANDBY_ID"
+            deploy production "$AZURE_URL" "$AZURE_KEY" "$PROD_ID" || failed=1
+            deploy standby "$ONPREM_URL" "$ONPREM_KEY" "$STANDBY_ID" || failed=1
           else
-            deploy staging "$AZURE_URL" "$AZURE_KEY" "$STAGING_ID"
+            deploy staging "$AZURE_URL" "$AZURE_KEY" "$STAGING_ID" || failed=1
           fi
+          exit "$failed"
 
       - name: Verify production runs the release
         if: inputs.channel == 'production' && inputs.parity-url != ''
