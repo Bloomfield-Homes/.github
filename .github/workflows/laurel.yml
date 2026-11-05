@@ -272,11 +272,12 @@ jobs:
           trigger_phrase: '/laurel'
           bot_name: bloomfield-laurel[bot]
           bot_id: '352642980'
-          settings: '{"permissions":{"deny":["WebFetch","WebSearch"]}}'
+          # The action adds git write tools to every mode; deny wins over allow, so review stays read-only.
+          settings: '{"permissions":{"deny":["WebFetch","WebSearch","Bash(git add:*)","Bash(git commit:*)","Bash(git rm:*)","Bash(git push:*)","Bash(*git-push.sh*)"]}}'
           claude_args: >-
             --model local
             --max-turns 40
-            --allowedTools "Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git status:*),Bash(git show:*),mcp__github_inline_comment__create_inline_comment"
+            --allowedTools "Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git status:*),Bash(git show:*),mcp__github_inline_comment__create_inline_comment,ToolSearch"
             --append-system-prompt "You are Laurel, the Bloomfield Homes code reviewer. Review this pull request's diff against its base branch. Do not edit files, commit or push. Report only real problems: bugs, security issues, missing error handling, broken tests, and clear violations of the repository's own conventions. Skip style nits and praise. Post each finding as an inline comment on the exact line with what is wrong and a concrete fix. Then end with a short summary comment that lists the findings by severity, or says you found none. Never quote secrets, credentials or personal data from the code."
 
       - name: Push Laurel's branch
@@ -381,6 +382,7 @@ jobs:
           CONSOLE_URL: ${{ vars.LAUREL_CONSOLE_URL }}/gh/${{ github.event.repository.name }}/runs/${{ github.run_id }}
           OUTCOME: ${{ steps.laurel.outcome != 'skipped' && steps.laurel.outcome || steps.review.outcome }}
           STARTED_AT: ${{ steps.start.outputs.at }}
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file || steps.laurel.outputs.execution_file }}
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
@@ -398,6 +400,18 @@ jobs:
               const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
               const tracking = mine.find(c => new Date(c.created_at) >= since
                 && c.body && c.body.includes(`/actions/runs/${context.runId}`));
+              // A small model sometimes answers in plain text instead of updating its comment.
+              // Post that answer into the comment, and log which tools were denied (names only).
+              let result = null;
+              try {
+                const lines = JSON.parse(require('fs').readFileSync(process.env.EXECUTION_FILE, 'utf8'));
+                result = lines.find(m => m.type === 'result') || null;
+              } catch (e) {
+                core.info(`no execution file: ${e.message}`);
+              }
+              const denied = [...new Set(((result && result.permission_denials) || []).map(d => d.tool_name))];
+              if (denied.length) core.notice(`Laurel was denied: ${denied.join(', ')}`);
+              const placeholder = "I'll analyze this and get back to you.";
 
               const failed = ['failure', 'cancelled'].includes(process.env.OUTCOME);
               const hint = process.env.LAUREL_REVIEW === 'true'
@@ -413,6 +427,9 @@ jobs:
                   .replace(/ • \[Create PR ➔\]\([^\n]*\)/g, '')
                   .replace(/Claude Code/g, 'Laurel')
                   .replace(/\bClaude\b/g, 'Laurel');
+                if (body.includes(placeholder) && result && typeof result.result === 'string' && result.result.trim()) {
+                  body = body.replace(placeholder, result.result.trim());
+                }
                 if (failed && !body.includes(note)) body += `\n\n---\n${note}`;
                 if (!body.includes(marker)) body += `\n\n<sub>${marker}${link}</sub>`;
                 if (body !== tracking.body) {
