@@ -166,7 +166,7 @@ jobs:
       - name: Size the work
         id: triage
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true'
-        timeout-minutes: 15
+        timeout-minutes: 20
         continue-on-error: true
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         with:
@@ -185,7 +185,7 @@ jobs:
             ${{ steps.files.outputs.list }}
           claude_args: >-
             --model local
-            --max-turns 10
+            --max-turns 30
             --allowedTools "Read,Glob,Grep"
             --json-schema '{"type":"object","required":["files","changed_lines","split"],"properties":{"files":{"type":"array","items":{"type":"string"}},"changed_lines":{"type":"integer"},"split":{"type":"array","items":{"type":"object","required":["title","acceptance_criteria"],"properties":{"title":{"type":"string"},"acceptance_criteria":{"type":"array","items":{"type":"string"}}}}}}}'
 
@@ -205,7 +205,7 @@ jobs:
             const unsized = async () => {
               await github.rest.issues.createComment({
                 ...context.repo, issue_number: context.payload.issue.number,
-                body: 'Laurel could not size this issue within 15 minutes, which usually means it is too broad for one PR. ' +
+                body: 'Laurel could not size this issue, which usually means it is too broad for one PR. ' +
                   'Narrow it or split it into smaller issues, then label it laurel again.',
               });
               core.setOutput('oversize', 'true');
