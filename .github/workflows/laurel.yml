@@ -152,9 +152,68 @@ jobs:
           # A review diffs against the base branch, which needs full history.
           fetch-depth: ${{ env.LAUREL_REVIEW == 'true' && '0' || '1' }}
 
+      - name: Size the work
+        id: triage
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true'
+        timeout-minutes: 10
+        continue-on-error: true
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        with:
+          github_token: ${{ steps.app.outputs.token }}
+          anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
+          bot_name: bloomfield-laurel[bot]
+          bot_id: '352642980'
+          settings: '{"permissions":{"deny":["WebFetch","WebSearch"]}}'
+          # An explicit prompt runs the action in automation mode, without a tracking comment.
+          prompt: |
+            Read issue #${{ github.event.issue.number }} in this repository: title "${{ github.event.issue.title }}" and body below. Explore the code read-only and estimate the smallest change that meets its acceptance criteria. Report the files you would change, the total changed lines, and, only if that exceeds 10 files or 300 lines, a split into smaller issues, each with a title and its own acceptance criteria. Do not edit anything.
+
+            ${{ github.event.issue.body }}
+          claude_args: >-
+            --model local
+            --max-turns 15
+            --allowedTools "Read,Glob,Grep"
+            --json-schema '{"type":"object","required":["files","changed_lines","split"],"properties":{"files":{"type":"array","items":{"type":"string"}},"changed_lines":{"type":"integer"},"split":{"type":"array","items":{"type":"object","required":["title","acceptance_criteria"],"properties":{"title":{"type":"string"},"acceptance_criteria":{"type":"array","items":{"type":"string"}}}}}}}'
+
+      - name: Enforce the size limit
+        id: scope
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          TRIAGE: ${{ steps.triage.outputs.structured_output }}
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const MAX_FILES = 10;
+            const MAX_LINES = 300;
+            let est;
+            try {
+              est = JSON.parse(process.env.TRIAGE);
+            } catch (e) {
+              core.warning('Triage gave no estimate; continuing');
+              return;
+            }
+            const files = Array.isArray(est && est.files) ? est.files : [];
+            const lines = Number(est && est.changed_lines) || 0;
+            if (files.length <= MAX_FILES && lines <= MAX_LINES) return;
+            const split = Array.isArray(est.split) ? est.split : [];
+            const plan = split.map((s, i) => {
+              const criteria = (s.acceptance_criteria || []).map((c) => `   - [ ] ${c}`).join('\n');
+              return `${i + 1}. ${s.title}\n${criteria}`;
+            }).join('\n');
+            await github.rest.issues.createComment({
+              ...context.repo, issue_number: context.payload.issue.number,
+              body: `Laurel estimates this at ${files.length} files, about ${lines} changed lines. ` +
+                `The limit is ${MAX_FILES} files and ${MAX_LINES} lines, so I did not start.\n\n` +
+                `Files:\n${files.map((f) => `- \`${f}\``).join('\n')}\n\n` +
+                `Proposed split:\n${plan}\n\n` +
+                'Open these as separate issues and label each one laurel.',
+            });
+            core.setOutput('oversize', 'true');
+
       - name: Run Laurel
         id: laurel
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true' && steps.scope.outputs.oversize != 'true'
         timeout-minutes: 50
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         with:
@@ -172,7 +231,7 @@ jobs:
             --model local
             --max-turns 80
             --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
-            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Before writing any code, list the files you will change and estimate the changed lines. If that plan exceeds 10 files or 300 changed lines, do not implement it: post a proposed split into smaller issues, each with its own acceptance criteria, and stop. Keep the diff under 300 changed lines and 10 files. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer. The workflow pushes your branch after you finish; do not push. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
+            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer. The workflow pushes your branch after you finish; do not push. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
 
       - name: Run Laurel review
         id: review
