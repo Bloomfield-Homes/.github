@@ -107,7 +107,7 @@ jobs:
       - name: Link the Admin Console
         if: steps.auth.outputs.ok == 'true' && vars.LAUREL_CONSOLE_URL != ''
         env:
-          CONSOLE_URL: ${{ vars.LAUREL_CONSOLE_URL }}/gh/${{ github.event.repository.name }}/runs/${{ github.run_id }}
+          CONSOLE_URL: ${{ vars.LAUREL_CONSOLE_URL }}/gh/${{ github.event.repository.name }}/runs/${{ github.run_id }}?issue=${{ github.event.issue.number || github.event.pull_request.number }}
         run: |
           echo "::notice title=Watch Laurel live::$CONSOLE_URL"
           echo "[Watch Laurel live in the Admin Console]($CONSOLE_URL)" >> "$GITHUB_STEP_SUMMARY"
@@ -379,7 +379,7 @@ jobs:
         if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome != 'skipped' || steps.review.outcome != 'skipped')
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          CONSOLE_URL: ${{ vars.LAUREL_CONSOLE_URL }}/gh/${{ github.event.repository.name }}/runs/${{ github.run_id }}
+          CONSOLE_URL: ${{ vars.LAUREL_CONSOLE_URL }}/gh/${{ github.event.repository.name }}/runs/${{ github.run_id }}?issue=${{ github.event.issue.number || github.event.pull_request.number }}
           OUTCOME: ${{ steps.laurel.outcome != 'skipped' && steps.laurel.outcome || steps.review.outcome }}
           STARTED_AT: ${{ steps.start.outputs.at }}
           EXECUTION_FILE: ${{ steps.review.outputs.execution_file || steps.laurel.outputs.execution_file }}
