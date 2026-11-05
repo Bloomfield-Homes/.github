@@ -1,4 +1,5 @@
 # Laurel: Bloomfield Homes coding agent. Repos opt in with one caller workflow. The model is the gateway
+# A person's "@laurel review" comment on a PR runs a read-only review instead of the coding agent.
 # `local` alias only. Plan: vault Local-Cowork/Plans/2026-11-04-laurel-github-claude-code-action.md
 name: Laurel
 
@@ -38,6 +39,8 @@ jobs:
       group: laurel-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number }}
       cancel-in-progress: false
     env:
+      # "true" only for a PR conversation comment asking for review.
+      LAUREL_REVIEW: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(github.event.comment.body, '@laurel review') }}
       # Every model name Claude Code reads is the gateway alias, so nothing asks for a Claude model.
       ANTHROPIC_BASE_URL: ${{ vars.LAUREL_GATEWAY_URL }}
       ANTHROPIC_MODEL: local
@@ -141,7 +144,7 @@ jobs:
 
       - name: Run Laurel
         id: laurel
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false')
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true'
         timeout-minutes: 50
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         with:
@@ -159,8 +162,26 @@ jobs:
             --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
             --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Before writing any code, list the files you will change and estimate the changed lines. If that plan exceeds 10 files or 300 changed lines, do not implement it: post a proposed split into smaller issues, each with its own acceptance criteria, and stop. Keep the diff under 300 changed lines and 10 files. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer. The workflow pushes your branch after you finish; do not push. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
 
+      - name: Run Laurel review
+        id: review
+        if: steps.auth.outputs.ok == 'true' && env.LAUREL_REVIEW == 'true'
+        timeout-minutes: 30
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        with:
+          github_token: ${{ steps.app.outputs.token }}
+          anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
+          trigger_phrase: '@laurel'
+          bot_name: bloomfield-laurel[bot]
+          bot_id: '352642980'
+          settings: '{"permissions":{"deny":["WebFetch","WebSearch"]}}'
+          claude_args: >-
+            --model local
+            --max-turns 40
+            --allowedTools "Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git status:*),Bash(git show:*),mcp__github_inline_comment__create_inline_comment"
+            --append-system-prompt "You are Laurel, the Bloomfield Homes code reviewer. Review this pull request's diff against its base branch. Do not edit files, commit or push. Report only real problems: bugs, security issues, missing error handling, broken tests, and clear violations of the repository's own conventions. Skip style nits and praise. Post each finding as an inline comment on the exact line with what is wrong and a concrete fix. Then end with a short summary comment that lists the findings by severity, or says you found none. Never quote secrets, credentials or personal data from the code."
+
       - name: Report a failed run
-        if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome == 'failure' || steps.laurel.outcome == 'cancelled')
+        if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome == 'failure' || steps.laurel.outcome == 'cancelled' || steps.review.outcome == 'failure' || steps.review.outcome == 'cancelled')
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           github-token: ${{ steps.app.outputs.token }}
@@ -169,7 +190,7 @@ jobs:
               const number = (context.payload.issue || context.payload.pull_request).number;
               await github.rest.issues.createComment({
                 ...context.repo, issue_number: number,
-                body: `Laurel's run ended without a result (${{ steps.laurel.outcome }}). ` +
+                body: `Laurel's run ended without a result (${{ steps.laurel.outcome != 'skipped' && steps.laurel.outcome || steps.review.outcome }}). ` +
                   'The most common cause is a task too large for one run; consider splitting the issue. ' +
                   `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
               });
@@ -273,7 +294,7 @@ jobs:
             });
 
       - name: Rebrand Laurel's comment
-        if: always() && steps.auth.outputs.ok == 'true' && steps.laurel.outcome != 'skipped'
+        if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome != 'skipped' || steps.review.outcome != 'skipped')
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           github-token: ${{ steps.app.outputs.token }}
