@@ -252,3 +252,35 @@ jobs:
               owner, repo, issue_number: issue.number,
               body: `Laurel opened ${pr.html_url} (${lines} changed lines, ${files.length} files). It needs human review.`,
             });
+
+      - name: Rebrand Laurel's comment
+        if: always() && steps.auth.outputs.ok == 'true' && steps.laurel.outcome != 'skipped'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            try {
+              const number = (context.payload.issue || context.payload.pull_request).number;
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                ...context.repo, issue_number: number, per_page: 100,
+              });
+              const mine = comments.filter(c => c.user && c.user.type === 'Bot'
+                && c.user.login.startsWith('bloomfield-laurel') && c.body && c.body.includes('Claude'));
+              if (mine.length === 0) {
+                core.info('No Claude-branded Laurel comment found.');
+                return;
+              }
+              const latest = mine.reduce((a, b) => (new Date(b.created_at) > new Date(a.created_at) ? b : a));
+              const note = "\n\n<sub>Laurel runs on Bloomfield Homes' local model.</sub>";
+              let body = latest.body
+                // The link URL holds literal parens, so match to the line's last one.
+                .replace(/ • \[Create PR ➔\]\([^\n]*\)/g, '')
+                .replace(/Claude Code/g, 'Laurel')
+                .replace(/\bClaude\b/g, 'Laurel');
+              if (!body.includes(note.trim())) body += note;
+              if (body !== latest.body) {
+                await github.rest.issues.updateComment({ ...context.repo, comment_id: latest.id, body });
+              }
+            } catch (e) {
+              core.warning(`Could not rebrand comment: ${e.message}`);
+            }
