@@ -155,8 +155,8 @@ jobs:
           claude_args: >-
             --model local
             --max-turns 40
-            --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
-            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
+            --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git push origin HEAD),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
+            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer, then push the branch with git push origin HEAD. Never push to the default branch. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
 
       - name: Enforce small PRs and open the PR
         if: steps.auth.outputs.ok == 'true' && (steps.laurel.outputs.conclusion == 'success')
@@ -183,9 +183,20 @@ jobs:
               core.notice('Laurel produced no branch; nothing to check.');
               return;
             }
-            const { data: cmp } = await github.rest.repos.compareCommitsWithBasehead({
-              owner, repo, basehead: `${base}...${head}`, per_page: 100,
-            });
+            let cmp;
+            try {
+              ({ data: cmp } = await github.rest.repos.compareCommitsWithBasehead({
+                owner, repo, basehead: `${base}...${head}`, per_page: 100,
+              }));
+            } catch (e) {
+              if (e.status !== 404) throw e;
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: number,
+                body: `Laurel finished but its branch \`${head}\` never reached GitHub, so there is nothing to review. See the run log.`,
+              });
+              core.setFailed('Laurel branch was not pushed');
+              return;
+            }
             if (cmp.ahead_by === 0) {
               core.notice('No commits on the Laurel branch; nothing to check.');
               return;
