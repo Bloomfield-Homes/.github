@@ -11,7 +11,9 @@ on:
       LAUREL_GATEWAY_KEY:
         required: true
 
+# Callers must grant actions: read too; a reusable workflow cannot exceed its caller.
 permissions:
+  actions: read
   contents: read
   issues: read
   pull-requests: read
