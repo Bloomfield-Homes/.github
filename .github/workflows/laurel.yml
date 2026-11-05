@@ -156,10 +156,17 @@ jobs:
           # A review diffs against the base branch, which needs full history.
           fetch-depth: ${{ env.LAUREL_REVIEW == 'true' && '0' || '1' }}
 
+      - name: List the repo files
+        id: files
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true'
+        run: |
+          # Handing triage the file list saves the turns it would spend exploring.
+          { echo 'list<<LAUREL_FILES'; git ls-files | head -n 500; echo 'LAUREL_FILES'; } >> "$GITHUB_OUTPUT"
+
       - name: Size the work
         id: triage
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true'
-        timeout-minutes: 10
+        timeout-minutes: 15
         continue-on-error: true
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         with:
@@ -173,9 +180,12 @@ jobs:
             Read issue #${{ github.event.issue.number }} in this repository: title "${{ github.event.issue.title }}" and body below. Explore the code read-only and estimate the smallest change that meets its acceptance criteria. Report the files you would change, the total changed lines, and, only if that exceeds 10 files or 300 lines, a split into smaller issues, each with a title and its own acceptance criteria. Do not edit anything.
 
             ${{ github.event.issue.body }}
+
+            Files in this repository (first 500):
+            ${{ steps.files.outputs.list }}
           claude_args: >-
             --model local
-            --max-turns 15
+            --max-turns 10
             --allowedTools "Read,Glob,Grep"
             --json-schema '{"type":"object","required":["files","changed_lines","split"],"properties":{"files":{"type":"array","items":{"type":"string"}},"changed_lines":{"type":"integer"},"split":{"type":"array","items":{"type":"object","required":["title","acceptance_criteria"],"properties":{"title":{"type":"string"},"acceptance_criteria":{"type":"array","items":{"type":"string"}}}}}}}'
 
@@ -185,16 +195,30 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TRIAGE: ${{ steps.triage.outputs.structured_output }}
+          TRIAGE_OUTCOME: ${{ steps.triage.outcome }}
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
             const MAX_FILES = 10;
             const MAX_LINES = 300;
+            // Failing to size is the signal the issue is too broad, so stop rather than implement.
+            const unsized = async () => {
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: context.payload.issue.number,
+                body: 'Laurel could not size this issue within 15 minutes, which usually means it is too broad for one PR. ' +
+                  'Narrow it or split it into smaller issues, then label it laurel again.',
+              });
+              core.setOutput('oversize', 'true');
+            };
+            if (process.env.TRIAGE_OUTCOME !== 'success') {
+              await unsized();
+              return;
+            }
             let est;
             try {
               est = JSON.parse(process.env.TRIAGE);
             } catch (e) {
-              core.warning('Triage gave no estimate; continuing');
+              await unsized();
               return;
             }
             const files = Array.isArray(est && est.files) ? est.files : [];
