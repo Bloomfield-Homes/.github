@@ -261,7 +261,7 @@ jobs:
             --model local
             --max-turns 80
             --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
-            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer. The workflow pushes your branch after you finish; do not push. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
+            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. You cannot run tests, Ruby, Node or any build tool here; CI runs the tests on the PR. You cannot push; the workflow pushes your branch after you finish. If a command is denied, do not retry it or a variant of it. Once your change is committed, reply with a short summary and stop. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer. The workflow pushes your branch after you finish; do not push. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
 
       - name: Run Laurel review
         id: review
@@ -283,7 +283,8 @@ jobs:
             --append-system-prompt "You are Laurel, the Bloomfield Homes code reviewer. Review this pull request's diff against its base branch. Do not edit files, commit or push. Report only real problems: bugs, security issues, missing error handling, broken tests, and clear violations of the repository's own conventions. Skip style nits and praise. Post each finding as an inline comment on the exact line with what is wrong and a concrete fix. Then end with a short summary comment that lists the findings by severity, or says you found none. Never quote secrets, credentials or personal data from the code."
 
       - name: Push Laurel's branch
-        if: steps.auth.outputs.ok == 'true' && (steps.laurel.outputs.conclusion == 'success')
+        # A failed run (for example max turns) can still leave commits worth keeping.
+        if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome == 'success' || steps.laurel.outcome == 'failure')
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
@@ -293,13 +294,18 @@ jobs:
             echo "::warning::Laurel is on '$branch'; not pushing."
             exit 0
           fi
+          if [ "$(git rev-list --count "origin/$DEFAULT_BRANCH..HEAD")" = "0" ]; then
+            echo "::notice::Laurel made no commits; nothing to push."
+            exit 0
+          fi
           git push origin "HEAD:refs/heads/$branch"
 
       - name: Enforce small PRs and open the PR
-        if: steps.auth.outputs.ok == 'true' && (steps.laurel.outputs.conclusion == 'success')
+        if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome == 'success' || steps.laurel.outcome == 'failure')
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           LAUREL_BRANCH: ${{ steps.laurel.outputs.branch_name }}
+          LAUREL_OUTCOME: ${{ steps.laurel.outcome }}
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
@@ -367,10 +373,15 @@ jobs:
             const { data: open } = await github.rest.pulls.list({ owner, repo, head: `${owner}:${head}`, state: 'open' });
             if (open.length > 0) return;
             const issue = context.payload.issue;
+            const stopped = process.env.LAUREL_OUTCOME === 'failure';
+            const note = stopped
+              ? 'Laurel stopped before finishing (the run failed). Review the commits before marking this ready.\n\n'
+              : '';
             const { data: pr } = await github.rest.pulls.create({
               owner, repo, head, base,
               title: `Laurel: ${issue.title}`.slice(0, 120),
-              body: `Closes #${issue.number}\n\nWritten by Laurel on the local model. A person must review and merge; Laurel never merges.`,
+              body: `${note}Closes #${issue.number}\n\nWritten by Laurel on the local model. A person must review and merge; Laurel never merges.`,
+              ...(stopped ? { draft: true } : {}),
             });
             await github.rest.issues.createComment({
               owner, repo, issue_number: issue.number,
