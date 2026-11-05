@@ -1,6 +1,6 @@
 # Laurel: Bloomfield Homes coding agent. Repos opt in with one caller workflow. The model is the gateway
-# A person's "@laurel review" comment on a PR runs a read-only review instead of the coding agent.
 # `local` alias only. Plan: vault Local-Cowork/Plans/2026-11-04-laurel-github-claude-code-action.md
+# A person's "@laurel review" comment on a PR runs a read-only review instead of the coding agent.
 name: Laurel
 
 on:
@@ -140,7 +140,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           token: ${{ steps.app.outputs.token }}
-          fetch-depth: 1
+          # A review diffs against the base branch, which needs full history.
+          fetch-depth: ${{ env.LAUREL_REVIEW == 'true' && '0' || '1' }}
 
       - name: Run Laurel
         id: laurel
