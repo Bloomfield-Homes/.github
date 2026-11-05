@@ -273,7 +273,8 @@ jobs:
               const latest = mine.reduce((a, b) => (new Date(b.created_at) > new Date(a.created_at) ? b : a));
               const note = "\n\n<sub>Laurel runs on Bloomfield Homes' local model.</sub>";
               let body = latest.body
-                .replace(/ • \[Create PR ➔\]\([^)]*\)/g, '')
+                // The link URL holds literal parens, so match to the line's last one.
+                .replace(/ • \[Create PR ➔\]\([^\n]*\)/g, '')
                 .replace(/Claude Code/g, 'Laurel')
                 .replace(/\bClaude\b/g, 'Laurel');
               if (!body.includes(note.trim())) body += note;
