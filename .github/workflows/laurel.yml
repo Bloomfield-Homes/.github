@@ -142,6 +142,7 @@ jobs:
       - name: Run Laurel
         id: laurel
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false')
+        timeout-minutes: 50
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         with:
           github_token: ${{ steps.app.outputs.token }}
@@ -156,7 +157,25 @@ jobs:
             --model local
             --max-turns 80
             --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
-            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer. The workflow pushes your branch after you finish; do not push. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
+            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Before writing any code, list the files you will change and estimate the changed lines. If that plan exceeds 10 files or 300 changed lines, do not implement it: post a proposed split into smaller issues, each with its own acceptance criteria, and stop. Keep the diff under 300 changed lines and 10 files. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer. The workflow pushes your branch after you finish; do not push. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
+
+      - name: Report a failed run
+        if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome == 'failure' || steps.laurel.outcome == 'cancelled')
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            try {
+              const number = (context.payload.issue || context.payload.pull_request).number;
+              await github.rest.issues.createComment({
+                ...context.repo, issue_number: number,
+                body: `Laurel's run ended without a result (${{ steps.laurel.outcome }}). ` +
+                  'The most common cause is a task too large for one run; consider splitting the issue. ' +
+                  `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              });
+            } catch (e) {
+              core.warning(`could not post failure note: ${e.message}`);
+            }
 
       - name: Push Laurel's branch
         if: steps.auth.outputs.ok == 'true' && (steps.laurel.outputs.conclusion == 'success')
