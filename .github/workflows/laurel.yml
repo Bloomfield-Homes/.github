@@ -100,6 +100,14 @@ jobs:
             }
             core.setOutput('ok', 'true');
 
+      - name: Link the Admin Console
+        if: steps.auth.outputs.ok == 'true' && vars.LAUREL_CONSOLE_URL != ''
+        env:
+          CONSOLE_URL: ${{ vars.LAUREL_CONSOLE_URL }}/gh/${{ github.event.repository.name }}/runs/${{ github.run_id }}
+        run: |
+          echo "::notice title=Watch Laurel live::$CONSOLE_URL"
+          echo "[Watch Laurel live in the Admin Console]($CONSOLE_URL)" >> "$GITHUB_STEP_SUMMARY"
+
       - name: Require acceptance criteria
         id: gate
         if: steps.auth.outputs.ok == 'true' && (github.event_name == 'issues' || (github.event_name == 'issue_comment' && !github.event.issue.pull_request))
@@ -158,6 +166,8 @@ jobs:
           bot_name: bloomfield-laurel[bot]
           bot_id: '352642980'
           settings: '{"permissions":{"deny":["WebFetch","WebSearch"]}}'
+          # The transcript lands in the run log, which anyone who can read the repo can see.
+          show_full_output: ${{ github.event.repository.private }}
           claude_args: >-
             --model local
             --max-turns 80
@@ -298,6 +308,8 @@ jobs:
       - name: Rebrand Laurel's comment
         if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome != 'skipped' || steps.review.outcome != 'skipped')
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          CONSOLE_URL: ${{ vars.LAUREL_CONSOLE_URL }}/gh/${{ github.event.repository.name }}/runs/${{ github.run_id }}
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
@@ -313,13 +325,16 @@ jobs:
                 return;
               }
               const latest = mine.reduce((a, b) => (new Date(b.created_at) > new Date(a.created_at) ? b : a));
-              const note = "\n\n<sub>Laurel runs on Bloomfield Homes' local model.</sub>";
+              const marker = "Laurel runs on Bloomfield Homes' local model.";
+              const url = process.env.CONSOLE_URL;
+              const link = url && !url.startsWith('/gh/') ? ` [Watch this run](${url})` : '';
+              const note = `\n\n<sub>${marker}${link}</sub>`;
               let body = latest.body
                 // The link URL holds literal parens, so match to the line's last one.
                 .replace(/ • \[Create PR ➔\]\([^\n]*\)/g, '')
                 .replace(/Claude Code/g, 'Laurel')
                 .replace(/\bClaude\b/g, 'Laurel');
-              if (!body.includes(note.trim())) body += note;
+              if (!body.includes(marker)) body += note;
               if (body !== latest.body) {
                 await github.rest.issues.updateComment({ ...context.repo, comment_id: latest.id, body });
               }
