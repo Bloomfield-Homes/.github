@@ -1,6 +1,6 @@
 # Laurel: Bloomfield Homes coding agent. Repos opt in with one caller workflow. The model is the gateway
 # `local` alias only. Plan: vault Local-Cowork/Plans/2026-11-04-laurel-github-claude-code-action.md
-# A person's "@laurel review" comment on a PR runs a read-only review instead of the coding agent.
+# A person's "/laurel review" comment on a PR runs a read-only review instead of the coding agent.
 name: Laurel
 
 on:
@@ -18,19 +18,20 @@ permissions:
 
 jobs:
   laurel:
-    # Label trigger, or a person's @laurel mention on an issue, any PR conversation, or any PR review.
+    # Label trigger, or a person's comment starting with /laurel on an issue, any PR conversation, or any PR review.
+    # startsWith, not contains, so paths like docs/laurel.md do not start a run.
     # Review triggers skip fork PRs. The action itself also refuses actors without write access and all bots,
     # so Copilot's comments are acted on only when a person asks.
     if: >-
       (github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'laurel') ||
       (github.event_name == 'issue_comment' && github.event.sender.type == 'User' &&
-        contains(github.event.comment.body, '@laurel')) ||
+        startsWith(github.event.comment.body, '/laurel')) ||
       (github.event_name == 'pull_request_review_comment' && github.event.sender.type == 'User' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
-        contains(github.event.comment.body, '@laurel')) ||
+        startsWith(github.event.comment.body, '/laurel')) ||
       (github.event_name == 'pull_request_review' && github.event.sender.type == 'User' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
-        contains(github.event.review.body, '@laurel'))
+        startsWith(github.event.review.body, '/laurel'))
     runs-on:
       group: laurel
       labels: [self-hosted, laurel]
@@ -40,7 +41,7 @@ jobs:
       cancel-in-progress: false
     env:
       # "true" only for a PR conversation comment asking for review.
-      LAUREL_REVIEW: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request != null && contains(github.event.comment.body, '@laurel review') }}
+      LAUREL_REVIEW: ${{ github.event_name == 'issue_comment' && github.event.issue.pull_request != null && startsWith(github.event.comment.body, '/laurel review') }}
       # Every model name Claude Code reads is the gateway alias, so nothing asks for a Claude model.
       ANTHROPIC_BASE_URL: ${{ vars.LAUREL_GATEWAY_URL }}
       ANTHROPIC_MODEL: local
@@ -151,7 +152,7 @@ jobs:
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
-          trigger_phrase: '@laurel'
+          trigger_phrase: '/laurel'
           label_trigger: laurel
           branch_prefix: laurel/
           bot_name: bloomfield-laurel[bot]
@@ -171,7 +172,7 @@ jobs:
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
-          trigger_phrase: '@laurel'
+          trigger_phrase: '/laurel'
           bot_name: bloomfield-laurel[bot]
           bot_id: '352642980'
           settings: '{"permissions":{"deny":["WebFetch","WebSearch"]}}'
