@@ -155,7 +155,7 @@ jobs:
           claude_args: >-
             --model local
             --max-turns 40
-            --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
+            --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git push origin HEAD),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
             --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. Commit to the current branch with a subject of 50 characters or fewer, then push the branch with git push origin HEAD. Never push to the default branch. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
 
       - name: Enforce small PRs and open the PR
