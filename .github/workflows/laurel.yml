@@ -250,7 +250,8 @@ jobs:
                 // The cloud tier directly: one short call should not queue behind the shared GPU. The gateway screens it for PII.
                 model: 'nvidia-super',
                 temperature: 0,
-                max_tokens: 8000,
+                // Reasoning counts against this cap on the cloud tier.
+                max_tokens: 16000,
                 reasoning_effort: 'low',
                 messages: [
                   { role: 'system', content: 'You size GitHub issues for a coding agent. Reply with JSON only, matching the schema.' },
