@@ -236,7 +236,8 @@ jobs:
               '',
               'Estimate the smallest change that meets the acceptance criteria. Report the files you would change ' +
                 'and the total changed lines. Only if that exceeds 10 files or 300 lines, propose a split into ' +
-                'smaller issues, each with a title and its own acceptance criteria. A rough estimate is enough.',
+                'smaller issues, each with a title and its own acceptance criteria. A rough estimate is enough. ' +
+                'Keep the reply short: list at most 12 files, and propose at most 5 issues with at most 4 criteria each.',
             ].join('\n');
             const res = await fetch(url, {
               method: 'POST',
