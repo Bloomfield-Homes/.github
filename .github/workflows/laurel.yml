@@ -193,28 +193,91 @@ jobs:
       - name: Size the work
         id: triage
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true'
-        timeout-minutes: 20
+        timeout-minutes: 10
         continue-on-error: true
-        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          GATEWAY_URL: ${{ vars.LAUREL_GATEWAY_URL }}
+          GATEWAY_KEY: ${{ secrets.LAUREL_GATEWAY_KEY }}
+          FILES: ${{ steps.files.outputs.list }}
         with:
-          github_token: ${{ steps.app.outputs.token }}
-          anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
-          bot_name: bloomfield-laurel[bot]
-          bot_id: '352642980'
-          settings: '{"permissions":{"deny":["WebFetch","WebSearch"]}}'
-          # An explicit prompt runs the action in automation mode, without a tracking comment.
-          prompt: |
-            Read issue #${{ github.event.issue.number }} in this repository: title "${{ github.event.issue.title }}" and body below. Estimate the smallest change that meets its acceptance criteria. You have no tools. Answer in one reply from the issue and the file list below; a rough estimate is enough. Report the files you would change, the total changed lines, and, only if that exceeds 10 files or 300 lines, a split into smaller issues, each with a title and its own acceptance criteria. Do not edit anything.
-
-            ${{ github.event.issue.body }}
-
-            Files in this repository (first 500):
-            ${{ steps.files.outputs.list }}
-          claude_args: >-
-            --model local
-            --max-turns 60
-            --tools ""
-            --json-schema '{"type":"object","required":["files","changed_lines","split"],"properties":{"files":{"type":"array","items":{"type":"string"}},"changed_lines":{"type":"integer"},"split":{"type":"array","items":{"type":"object","required":["title","acceptance_criteria"],"properties":{"title":{"type":"string"},"acceptance_criteria":{"type":"array","items":{"type":"string"}}}}}}}'
+          script: |
+            // One chat completion, not an agent run: the agent prompt alone made triage time out.
+            const url = `${process.env.GATEWAY_URL.replace(/\/$/, '')}/v1/chat/completions`;
+            const issue = context.payload.issue;
+            const title = issue.title;
+            const body = issue.body || '';
+            const schema = {
+              type: 'object',
+              required: ['files', 'changed_lines', 'split'],
+              properties: {
+                files: { type: 'array', items: { type: 'string' } },
+                changed_lines: { type: 'integer' },
+                split: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    required: ['title', 'acceptance_criteria'],
+                    properties: {
+                      title: { type: 'string' },
+                      acceptance_criteria: { type: 'array', items: { type: 'string' } },
+                    },
+                  },
+                },
+              },
+            };
+            const prompt = [
+              `Issue #${issue.number}: ${title}`,
+              '',
+              body,
+              '',
+              'Files in this repository (first 500):',
+              process.env.FILES,
+              '',
+              'Estimate the smallest change that meets the acceptance criteria. Report the files you would change ' +
+                'and the total changed lines. Only if that exceeds 10 files or 300 lines, propose a split into ' +
+                'smaller issues, each with a title and its own acceptance criteria. A rough estimate is enough.',
+            ].join('\n');
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${process.env.GATEWAY_KEY}`,
+                'Content-Type': 'application/json',
+              },
+              signal: AbortSignal.timeout(9 * 60 * 1000),
+              body: JSON.stringify({
+                model: 'local',
+                temperature: 0,
+                max_tokens: 4000,
+                reasoning_effort: 'low',
+                messages: [
+                  { role: 'system', content: 'You size GitHub issues for a coding agent. Reply with JSON only, matching the schema.' },
+                  { role: 'user', content: prompt },
+                ],
+                response_format: { type: 'json_schema', json_schema: { name: 'estimate', schema } },
+              }),
+            });
+            if (!res.ok) {
+              core.setFailed(`Gateway returned ${res.status}`);
+              return;
+            }
+            let estimate;
+            try {
+              const data = await res.json();
+              const content = data.choices[0].message.content
+                .trim()
+                .replace(/^```(?:json)?\s*/i, '')
+                .replace(/\s*```$/, '');
+              estimate = JSON.parse(content);
+            } catch (e) {
+              core.setFailed('Triage reply was not JSON');
+              return;
+            }
+            core.setOutput('structured_output', JSON.stringify(estimate));
+            core.info(
+              `Triage: ${(estimate.files || []).length} files, ${estimate.changed_lines} changed lines, ` +
+                `${(estimate.split || []).length} split issues`,
+            );
 
       - name: Enforce the size limit
         id: scope
