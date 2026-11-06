@@ -150,6 +150,31 @@ jobs:
               core.info(`label not removed: ${e.message}`);
             }
 
+      - name: Acknowledge the request
+        id: ack
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          CONSOLE_URL: ${{ vars.LAUREL_CONSOLE_URL }}/gh/${{ github.event.repository.name }}/runs/${{ github.run_id }}?issue=${{ github.event.issue.number || github.event.pull_request.number }}
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            // Sizing can take 20 minutes; this comment shows the issue was picked up.
+            // A failed post must not fail the run.
+            try {
+              const number = (context.payload.issue || context.payload.pull_request).number;
+              const url = process.env.CONSOLE_URL;
+              const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+              const link = url && !url.startsWith('/gh/') ? `[Watch it live](${url})` : `[Follow the run](${runUrl})`;
+              const { data: comment } = await github.rest.issues.createComment({
+                ...context.repo, issue_number: number,
+                body: `Laurel picked this up and is sizing the work before starting. ${link}`,
+              });
+              core.setOutput('comment_id', String(comment.id));
+            } catch (e) {
+              core.warning(`Could not acknowledge the request: ${e.message}`);
+            }
+
       - name: Check out repository
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -187,7 +212,7 @@ jobs:
             ${{ steps.files.outputs.list }}
           claude_args: >-
             --model local
-            --max-turns 30
+            --max-turns 60
             --allowedTools "Read,Glob,Grep"
             --json-schema '{"type":"object","required":["files","changed_lines","split"],"properties":{"files":{"type":"array","items":{"type":"string"}},"changed_lines":{"type":"integer"},"split":{"type":"array","items":{"type":"object","required":["title","acceptance_criteria"],"properties":{"title":{"type":"string"},"acceptance_criteria":{"type":"array","items":{"type":"string"}}}}}}}'
 
@@ -198,18 +223,30 @@ jobs:
         env:
           TRIAGE: ${{ steps.triage.outputs.structured_output }}
           TRIAGE_OUTCOME: ${{ steps.triage.outcome }}
+          ACK_ID: ${{ steps.ack.outputs.comment_id }}
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
             const MAX_FILES = 10;
             const MAX_LINES = 300;
+            // Reuses the acknowledgement comment when there is one.
+            const post = async (body) => {
+              if (process.env.ACK_ID) {
+                await github.rest.issues.updateComment({
+                  ...context.repo, comment_id: Number(process.env.ACK_ID), body,
+                });
+              } else {
+                await github.rest.issues.createComment({
+                  ...context.repo, issue_number: context.payload.issue.number, body,
+                });
+              }
+            };
             // Failing to size is the signal the issue is too broad, so stop rather than implement.
             const unsized = async () => {
-              await github.rest.issues.createComment({
-                ...context.repo, issue_number: context.payload.issue.number,
-                body: 'Laurel could not size this issue, which usually means it is too broad for one PR. ' +
+              await post(
+                'Laurel could not size this issue, which usually means it is too broad for one PR. ' +
                   'Narrow it or split it into smaller issues, then label it laurel again.',
-              });
+              );
               core.setOutput('oversize', 'true');
             };
             if (process.env.TRIAGE_OUTCOME !== 'success') {
@@ -231,14 +268,13 @@ jobs:
               const criteria = (s.acceptance_criteria || []).map((c) => `   - [ ] ${c}`).join('\n');
               return `${i + 1}. ${s.title}\n${criteria}`;
             }).join('\n');
-            await github.rest.issues.createComment({
-              ...context.repo, issue_number: context.payload.issue.number,
-              body: `Laurel estimates this at ${files.length} files, about ${lines} changed lines. ` +
+            await post(
+              `Laurel estimates this at ${files.length} files, about ${lines} changed lines. ` +
                 `The limit is ${MAX_FILES} files and ${MAX_LINES} lines, so I did not start.\n\n` +
                 `Files:\n${files.map((f) => `- \`${f}\``).join('\n')}\n\n` +
                 `Proposed split:\n${plan}\n\n` +
                 'Open these as separate issues and label each one laurel.',
-            });
+            );
             core.setOutput('oversize', 'true');
 
       - name: Run Laurel
@@ -396,6 +432,7 @@ jobs:
           OUTCOME: ${{ steps.laurel.outcome != 'skipped' && steps.laurel.outcome || steps.review.outcome }}
           STARTED_AT: ${{ steps.start.outputs.at }}
           EXECUTION_FILE: ${{ steps.review.outputs.execution_file || steps.laurel.outputs.execution_file }}
+          ACK_ID: ${{ steps.ack.outputs.comment_id }}
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
@@ -411,7 +448,9 @@ jobs:
                 && c.user.login.startsWith('bloomfield-laurel'));
               const older = mine.filter(c => new Date(c.created_at) < since);
               const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-              const tracking = mine.find(c => new Date(c.created_at) >= since
+              // The acknowledgement can hold this run's URL, so it never counts as the tracking comment.
+              const tracking = mine.find(c => c.id !== Number(process.env.ACK_ID)
+                && new Date(c.created_at) >= since
                 && c.body && c.body.includes(`/actions/runs/${context.runId}`));
               // A small model sometimes answers in plain text instead of updating its comment.
               // Post that answer into the comment, and log which tools were denied (names only).
@@ -448,8 +487,16 @@ jobs:
                 if (body !== tracking.body) {
                   await github.rest.issues.updateComment({ ...context.repo, comment_id: tracking.id, body });
                 }
+                // The tracking comment carries the run, so the acknowledgement is redundant.
+                if (process.env.ACK_ID) {
+                  await github.rest.issues.deleteComment({ ...context.repo, comment_id: Number(process.env.ACK_ID) });
+                }
               } else if (failed) {
-                await github.rest.issues.createComment({ ...context.repo, issue_number: number, body: note });
+                if (process.env.ACK_ID) {
+                  await github.rest.issues.updateComment({ ...context.repo, comment_id: Number(process.env.ACK_ID), body: note });
+                } else {
+                  await github.rest.issues.createComment({ ...context.repo, issue_number: number, body: note });
+                }
               }
 
               for (const c of older) {
