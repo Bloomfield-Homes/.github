@@ -204,7 +204,7 @@ jobs:
           settings: '{"permissions":{"deny":["WebFetch","WebSearch"]}}'
           # An explicit prompt runs the action in automation mode, without a tracking comment.
           prompt: |
-            Read issue #${{ github.event.issue.number }} in this repository: title "${{ github.event.issue.title }}" and body below. Explore the code read-only and estimate the smallest change that meets its acceptance criteria. Report the files you would change, the total changed lines, and, only if that exceeds 10 files or 300 lines, a split into smaller issues, each with a title and its own acceptance criteria. Do not edit anything.
+            Read issue #${{ github.event.issue.number }} in this repository: title "${{ github.event.issue.title }}" and body below. Estimate the smallest change that meets its acceptance criteria. Work mainly from the issue and the file list below; use at most 10 Read, Glob or Grep calls, and only to confirm which files change. A rough estimate is enough. As soon as you can see the change needs more than 10 files or 300 lines, stop reading and answer. Report the files you would change, the total changed lines, and, only if that exceeds 10 files or 300 lines, a split into smaller issues, each with a title and its own acceptance criteria. Do not edit anything.
 
             ${{ github.event.issue.body }}
 
