@@ -211,16 +211,17 @@ jobs:
               type: 'object',
               required: ['files', 'changed_lines', 'split'],
               properties: {
-                files: { type: 'array', items: { type: 'string' } },
+                files: { type: 'array', maxItems: 12, items: { type: 'string' } },
                 changed_lines: { type: 'integer' },
                 split: {
                   type: 'array',
+                  maxItems: 5,
                   items: {
                     type: 'object',
                     required: ['title', 'acceptance_criteria'],
                     properties: {
                       title: { type: 'string' },
-                      acceptance_criteria: { type: 'array', items: { type: 'string' } },
+                      acceptance_criteria: { type: 'array', maxItems: 4, items: { type: 'string' } },
                     },
                   },
                 },
@@ -239,51 +240,69 @@ jobs:
                 'smaller issues, each with a title and its own acceptance criteria. A rough estimate is enough. ' +
                 'Keep the reply short: list at most 12 files, and propose at most 5 issues with at most 4 criteria each.',
             ].join('\n');
-            const res = await fetch(url, {
-              method: 'POST',
-              headers: {
-                Authorization: `Bearer ${process.env.GATEWAY_KEY}`,
-                'Content-Type': 'application/json',
-              },
-              signal: AbortSignal.timeout(9 * 60 * 1000),
-              body: JSON.stringify({
-                // The cloud tier directly: one short call should not queue behind the shared GPU. The gateway screens it for PII.
-                model: 'nvidia-super',
-                temperature: 0,
-                // Reasoning counts against this cap on the cloud tier.
-                max_tokens: 16000,
-                reasoning_effort: 'low',
-                messages: [
-                  { role: 'system', content: 'You size GitHub issues for a coding agent. Reply with JSON only, matching the schema.' },
-                  { role: 'user', content: prompt },
-                ],
-                response_format: { type: 'json_schema', json_schema: { name: 'estimate', schema } },
-              }),
-            });
-            if (!res.ok) {
-              core.setFailed(`Gateway returned ${res.status}`);
-              return;
+            // One retry covers a truncated reply or a stalled gateway. Node's fetch gives up after 5 minutes
+            // without headers, so two 4-minute attempts fit inside the step timeout.
+            const ATTEMPTS = 2;
+            for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
+              const estimate = await requestEstimate();
+              if (estimate) {
+                core.setOutput('structured_output', JSON.stringify(estimate));
+                core.info(
+                  `Triage: ${(estimate.files || []).length} files, ${estimate.changed_lines} changed lines, ` +
+                    `${(estimate.split || []).length} split issues`,
+                );
+                return;
+              }
+              core.info(`Triage attempt ${attempt} of ${ATTEMPTS} failed`);
             }
-            const data = await res.json();
-            let estimate;
-            try {
-              const content = data.choices[0].message.content
-                .trim()
-                .replace(/^```(?:json)?\s*/i, '')
-                .replace(/\s*```$/, '');
-              estimate = JSON.parse(content);
-            } catch (e) {
-              core.info(
-                `Triage reply: model=${data.model}, finish_reason=${data.choices?.[0]?.finish_reason}, content_length=${(data.choices?.[0]?.message?.content || '').length}, has_reasoning=${Boolean(data.choices?.[0]?.message?.reasoning_content || data.choices?.[0]?.message?.reasoning)}, completion_tokens=${data.usage?.completion_tokens}`,
-              );
-              core.setFailed('Triage reply was not JSON');
-              return;
+            core.setFailed('Triage did not return an estimate');
+
+            async function requestEstimate() {
+              let data;
+              try {
+                const res = await fetch(url, {
+                  method: 'POST',
+                  headers: {
+                    Authorization: `Bearer ${process.env.GATEWAY_KEY}`,
+                    'Content-Type': 'application/json',
+                  },
+                  signal: AbortSignal.timeout(4 * 60 * 1000),
+                  body: JSON.stringify({
+                    // The cloud tier directly: one short call should not queue behind the shared GPU. The gateway screens it for PII.
+                    model: 'nvidia-super',
+                    temperature: 0,
+                    // Reasoning counts against this cap on the cloud tier.
+                    max_tokens: 16000,
+                    reasoning_effort: 'low',
+                    messages: [
+                      { role: 'system', content: 'You size GitHub issues for a coding agent. Reply with JSON only, matching the schema.' },
+                      { role: 'user', content: prompt },
+                    ],
+                    response_format: { type: 'json_schema', json_schema: { name: 'estimate', schema } },
+                  }),
+                });
+                if (!res.ok) {
+                  core.warning(`Gateway returned ${res.status}`);
+                  return null;
+                }
+                data = await res.json();
+              } catch (e) {
+                core.warning(`Gateway request failed: ${e.message}${e.cause ? ` (${e.cause.code || e.cause.name})` : ''}`);
+                return null;
+              }
+              try {
+                const content = data.choices[0].message.content
+                  .trim()
+                  .replace(/^```(?:json)?\s*/i, '')
+                  .replace(/\s*```$/, '');
+                return JSON.parse(content);
+              } catch (e) {
+                core.warning(
+                  `Triage reply was not JSON: model=${data.model}, finish_reason=${data.choices?.[0]?.finish_reason}, content_length=${(data.choices?.[0]?.message?.content || '').length}, has_reasoning=${Boolean(data.choices?.[0]?.message?.reasoning_content || data.choices?.[0]?.message?.reasoning)}, completion_tokens=${data.usage?.completion_tokens}`,
+                );
+                return null;
+              }
             }
-            core.setOutput('structured_output', JSON.stringify(estimate));
-            core.info(
-              `Triage: ${(estimate.files || []).length} files, ${estimate.changed_lines} changed lines, ` +
-                `${(estimate.split || []).length} split issues`,
-            );
 
       - name: Enforce the size limit
         id: scope
@@ -331,17 +350,28 @@ jobs:
             }
             const files = Array.isArray(est && est.files) ? est.files : [];
             const lines = Number(est && est.changed_lines) || 0;
-            if (files.length <= MAX_FILES && lines <= MAX_LINES) return;
-            const split = Array.isArray(est.split) ? est.split : [];
+            const split = Array.isArray(est && est.split) ? est.split : [];
+
+            // A proposed split means the model judged it oversize, even when it reports zero files or lines.
+            if (split.length === 0) {
+              if (files.length === 0 || lines <= 0) {
+                await unsized();
+                return;
+              }
+              if (files.length <= MAX_FILES && lines <= MAX_LINES) return;
+            }
             const plan = split.map((s, i) => {
               const criteria = (s.acceptance_criteria || []).map((c) => `   - [ ] ${c}`).join('\n');
               return `${i + 1}. ${s.title}\n${criteria}`;
             }).join('\n');
+            const size = files.length > 0 && lines > 0
+              ? `Laurel estimates this at ${files.length} files, about ${lines} changed lines. `
+              : 'Laurel judged this too broad for one PR. ';
+            const fileList = files.length > 0 ? `Files:\n${files.map((f) => `- \`${f}\``).join('\n')}\n\n` : '';
+            const splitText = plan ? `Proposed split:\n${plan}\n\n` : '';
             await post(
-              `Laurel estimates this at ${files.length} files, about ${lines} changed lines. ` +
-                `The limit is ${MAX_FILES} files and ${MAX_LINES} lines, so I did not start.\n\n` +
-                `Files:\n${files.map((f) => `- \`${f}\``).join('\n')}\n\n` +
-                `Proposed split:\n${plan}\n\n` +
+              size + `The limit is ${MAX_FILES} files and ${MAX_LINES} lines, so I did not start.\n\n` +
+                fileList + splitText +
                 'Open these as separate issues and label each one laurel.',
             );
             core.setOutput('oversize', 'true');
