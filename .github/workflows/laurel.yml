@@ -422,6 +422,8 @@ jobs:
         if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome == 'success' || steps.laurel.outcome == 'failure')
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          LAUREL_BOT: bloomfield-laurel[bot]
+          LAUREL_BOT_ID: '352642980'
         run: |
           branch="$(git rev-parse --abbrev-ref HEAD)"
           # Never write to the default branch, even if the agent switched to it.
@@ -433,6 +435,18 @@ jobs:
             echo "::notice::Laurel made no commits; nothing to push."
             exit 0
           fi
+
+          # Laurel is the only co-author. The action adds the triggering user and Claude Code adds itself,
+          # so rewrite the trailers on commits not yet on the remote, which keeps the push a fast-forward.
+          base="origin/$DEFAULT_BRANCH"
+          if git fetch --depth=1 origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null; then
+            base="origin/$branch"
+          fi
+          export LAUREL_TRAILER="Co-authored-by: $LAUREL_BOT <$LAUREL_BOT_ID+$LAUREL_BOT@users.noreply.github.com>"
+          FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter \
+            'grep -vi "^co-authored-by:" | git interpret-trailers --trailer "$LAUREL_TRAILER"' \
+            -- "$base..HEAD"
+
           git push origin "HEAD:refs/heads/$branch"
 
       - name: Enforce small PRs and open the PR
