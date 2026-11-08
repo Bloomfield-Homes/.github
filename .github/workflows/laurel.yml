@@ -182,6 +182,7 @@ jobs:
             }
 
       - name: Check out repository
+        id: checkout
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -407,7 +408,7 @@ jobs:
             --model auto
             --max-turns 80
             --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
-            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. You cannot run tests, Ruby, Node or any build tool here; CI runs the tests on the PR. You cannot push; the workflow pushes your branch after you finish. If a command is denied, do not retry it or a variant of it. Once your change is committed, reply with a short summary and stop. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. When you write tests, each assertion must fail if the behaviour it names breaks: never assert only that an object exists or is not nil, loop over data instead of repeating near-identical examples, name each example for what it asserts, and do not add comments explaining the test framework. Follow the repository's CLAUDE.md or AGENTS.md conventions. Commit to the current branch with a subject of 50 characters or fewer. The workflow pushes your branch after you finish; do not push. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
+            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. You cannot run tests, Ruby, Node or any build tool here; CI runs the tests on the PR. You cannot push; the workflow pushes your branch after you finish. If a command is denied, do not retry it or a variant of it. Once your change is committed, reply with a short summary and stop. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. When you write tests, each assertion must fail if the behaviour it names breaks: never assert only that an object exists or is not nil, loop over data instead of repeating near-identical examples, name each example for what it asserts, and do not add comments explaining the test framework. Follow the repository's CLAUDE.md or AGENTS.md conventions. Commit to the current branch with a subject of 50 characters or fewer. The workflow pushes your branch and opens the pull request after you finish; do not push, and do not explain how to push or open a pull request. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
 
       - name: Run Laurel review
         id: review
@@ -435,6 +436,7 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           LAUREL_BOT: bloomfield-laurel[bot]
           LAUREL_BOT_ID: '352642980'
+          START_SHA: ${{ steps.checkout.outputs.commit }}
         run: |
           branch="$(git rev-parse --abbrev-ref HEAD)"
           # Never write to the default branch, even if the agent switched to it.
@@ -449,14 +451,20 @@ jobs:
 
           # Laurel is the only co-author. The action adds the triggering user and Claude Code adds itself,
           # so rewrite the trailers on commits not yet on the remote, which keeps the push a fast-forward.
-          base="origin/$DEFAULT_BRANCH"
+          # The base is the commit Laurel started from, never origin/<default>: in this shallow clone the
+          # default branch can move during the run, and a range against it would rewrite the base into a root.
+          base="$START_SHA"
           if git fetch --depth=1 origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null; then
             base="origin/$branch"
           fi
-          export LAUREL_TRAILER="Co-authored-by: $LAUREL_BOT <$LAUREL_BOT_ID+$LAUREL_BOT@users.noreply.github.com>"
-          FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter \
-            'grep -vi "^co-authored-by:" | git interpret-trailers --trailer "$LAUREL_TRAILER"' \
-            -- "$base..HEAD"
+          if git merge-base --is-ancestor "$base" HEAD; then
+            export LAUREL_TRAILER="Co-authored-by: $LAUREL_BOT <$LAUREL_BOT_ID+$LAUREL_BOT@users.noreply.github.com>"
+            FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter \
+              'grep -vi "^co-authored-by:" | git interpret-trailers --trailer "$LAUREL_TRAILER"' \
+              -- "$base..HEAD"
+          else
+            echo "::warning::$base is not an ancestor of HEAD; pushing without rewriting co-author trailers."
+          fi
 
           git push origin "HEAD:refs/heads/$branch"
 
@@ -493,11 +501,26 @@ jobs:
               }));
             } catch (e) {
               if (e.status !== 404) throw e;
+              // GitHub answers 404 both for a missing branch and for one that shares no history with the base.
+              const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+              let pushed = true;
+              try {
+                await github.rest.repos.getBranch({ owner, repo, branch: head });
+              } catch (err) {
+                if (err.status !== 404) throw err;
+                pushed = false;
+              }
+              const what = pushed
+                ? `Laurel pushed [\`${head}\`](${context.serverUrl}/${owner}/${repo}/tree/${head}), but it shares no ` +
+                  `history with \`${base}\`, so no PR can be opened from it. This is a workflow fault, not a problem with the issue.`
+                : `Laurel finished, but pushing \`${head}\` failed, so there is nothing to review. ` +
+                  `The "Push Laurel's branch" step in the [run log](${runUrl}) has the error.`;
               await github.rest.issues.createComment({
                 owner, repo, issue_number: number,
-                body: `Laurel finished but its branch \`${head}\` never reached GitHub, so there is nothing to review. See the run log.`,
+                body: `${what}\n\n**To retry:** ${pushed ? `delete \`${head}\`, then ` : ''}remove and re-add the ` +
+                  '`laurel` label. If it fails the same way again, report it with a link to the run.',
               });
-              core.setFailed('Laurel branch was not pushed');
+              core.setFailed(pushed ? 'Laurel branch shares no history with the base' : 'Laurel branch was not pushed');
               return;
             }
             if (cmp.ahead_by === 0) {
@@ -590,9 +613,17 @@ jobs:
               const placeholder = "I'll analyze this and get back to you.";
 
               const failed = ['failure', 'cancelled'].includes(process.env.OUTCOME);
-              const hint = process.env.LAUREL_REVIEW === 'true'
-                ? '' : 'The most common cause is a task too large for one run; consider splitting the issue. ';
-              const note = `Laurel's run ended without a result (${process.env.OUTCOME}). ${hint}Run: ${runUrl}`;
+              const isPr = Boolean(context.payload.pull_request || (context.payload.issue && context.payload.issue.pull_request));
+              let why = 'Laurel hit an error before finishing.';
+              if (process.env.OUTCOME === 'cancelled') why = 'The run was cancelled or hit its time limit.';
+              else if (result && result.subtype === 'error_max_turns') why = 'Laurel used all its turns before finishing.';
+              else if (!result) why = 'Laurel stopped without a final answer, usually at the 50-minute time limit.';
+              let next;
+              if (process.env.LAUREL_REVIEW === 'true') next = 'Comment `/laurel review` to try again.';
+              else if (isPr) next = 'Comment `/laurel` with what still needs fixing to try again.';
+              else next = 'Any commits it made are on its branch, in a draft PR if one opened. If the issue asks for ' +
+                'several changes, split it; otherwise remove and re-add the `laurel` label to retry.';
+              const note = `**Laurel did not finish.** ${why}\n\n**Next:** ${next}\n\n[Run log](${runUrl})`;
 
               if (tracking) {
                 const marker = "Laurel runs on Bloomfield Homes' local model.";
