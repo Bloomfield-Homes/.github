@@ -58,8 +58,8 @@ function planPrompt({ issue, files }) {
     'Files in this repository (first 500):',
     files,
     '',
-    'You are the planning stage. Read only what you need to plan the smallest change that meets the ' +
-      'acceptance criteria above. Do not edit anything. Reply with exactly these sections:',
+    'You are the planning stage. Read at most 8 files, only what you need to plan the smallest change ' +
+      'that meets the acceptance criteria above. Do not edit anything. Reply with exactly these sections:',
     '## Files: each file to change, one per line.',
     '## Changes: for each file, the exact change, specific enough to make without further reading.',
     '## Criteria met: each acceptance criterion the change meets.',

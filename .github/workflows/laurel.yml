@@ -39,7 +39,7 @@ jobs:
     runs-on:
       group: laurel
       labels: [self-hosted, laurel]
-    timeout-minutes: 60
+    timeout-minutes: 90
     concurrency:
       group: laurel-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number }}
       cancel-in-progress: false
@@ -483,7 +483,7 @@ jobs:
       - name: Plan
         id: stage_plan
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.stages.outputs.has_plan != 'true'
-        timeout-minutes: 10
+        timeout-minutes: 20
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         with:
           github_token: ${{ steps.app.outputs.token }}
@@ -547,7 +547,7 @@ jobs:
       - name: Build
         id: stage_build
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.plan_record.outputs.stop != 'true'
-        timeout-minutes: 20
+        timeout-minutes: 30
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         with:
           github_token: ${{ steps.app.outputs.token }}
