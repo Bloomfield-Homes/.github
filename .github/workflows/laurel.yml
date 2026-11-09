@@ -651,15 +651,16 @@ jobs:
           BUILD_FILE: ${{ steps.stage_build.outputs.execution_file }}
         run: |
           # One outcome for the tidy step: stopped (a stage said why in the live comment), the first failed stage, or success.
-          outcome=success file="$BUILD_FILE"
+          outcome=success file="$BUILD_FILE" stage=
           if [ "$STOP" = true ]; then outcome=stopped
-          elif [ "$PLAN" = failure ] || [ "$PLAN" = cancelled ]; then outcome=$PLAN file="$PLAN_FILE"
+          elif [ "$PLAN" = failure ] || [ "$PLAN" = cancelled ]; then outcome=$PLAN file="$PLAN_FILE" stage=Plan
           else
-            for o in "$RECORD" "$BUILD" "$CHECK"; do
-              if [ "$o" = failure ] || [ "$o" = cancelled ]; then outcome=$o; break; fi
+            for s in "Record the plan=$RECORD" "Build=$BUILD" "Review the build=$CHECK"; do
+              o=${s##*=}
+              if [ "$o" = failure ] || [ "$o" = cancelled ]; then outcome=$o stage=${s%=*}; break; fi
             done
           fi
-          { echo "outcome=$outcome"; echo "execution_file=$file"; } >> "$GITHUB_OUTPUT"
+          { echo "outcome=$outcome"; echo "execution_file=$file"; echo "stage=$stage"; } >> "$GITHUB_OUTPUT"
 
       - name: Run Laurel review
         id: review
@@ -844,6 +845,7 @@ jobs:
           EXECUTION_FILE: ${{ steps.review.outputs.execution_file || steps.laurel.outputs.execution_file || steps.staged.outputs.execution_file }}
           ACK_ID: ${{ steps.ack.outputs.comment_id }}
           PR_URL: ${{ steps.pr.outputs.pr_url }}
+          FAILED_STAGE: ${{ steps.staged.outputs.stage }}
           # The staged path's plan and review for this issue revision stay visible across runs.
           STAGE_REV: ${{ steps.stages.outputs.rev }}
         with:
@@ -881,10 +883,12 @@ jobs:
 
               const failed = ['failure', 'cancelled'].includes(process.env.OUTCOME);
               const isPr = Boolean(context.payload.pull_request || (context.payload.issue && context.payload.issue.pull_request));
+              const stage = process.env.FAILED_STAGE;
               let why = 'Laurel hit an error before finishing.';
               if (process.env.OUTCOME === 'cancelled') why = 'The run was cancelled or hit its time limit.';
               else if (result && result.subtype === 'error_max_turns') why = 'Laurel used all its turns before finishing.';
-              else if (!result) why = 'Laurel stopped without a final answer, usually at the 50-minute time limit.';
+              else if (!result) why = 'Laurel stopped without a final answer, usually at its time limit.';
+              if (stage) why = `The ${stage} stage did not finish. ${why}`;
               let next;
               if (process.env.LAUREL_REVIEW === 'true') next = 'Comment `/laurel review` to try again.';
               else if (isPr) next = 'Comment `/laurel` with what still needs fixing to try again.';
