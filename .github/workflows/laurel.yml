@@ -50,6 +50,23 @@ jobs:
       LAUREL_ISSUE: ${{ github.event_name == 'issues' || (github.event_name == 'issue_comment' && !github.event.issue.pull_request) }}
       # "true" for a Request changes review on Laurel's PR without /laurel, which the action needs as a prompt.
       LAUREL_AUTOFIX: ${{ github.event_name == 'pull_request_review' && github.event.review.state == 'changes_requested' && !startsWith(github.event.review.body, '/laurel') }}
+      # "true" for issue work in a repo named in the org variable LAUREL_STAGED_REPOS (comma-separated). Plan, build,
+      # review and fix then run as separate fresh agents, and the issue's comments carry state between them.
+      LAUREL_STAGED: ${{ (github.event_name == 'issues' || (github.event_name == 'issue_comment' && !github.event.issue.pull_request)) && contains(format(',{0},', vars.LAUREL_STAGED_REPOS), format(',{0},', github.event.repository.name)) }}
+      # Rules every coding agent gets, in both the single-session and the staged path.
+      LAUREL_RULES: >-
+        You are Laurel, the Bloomfield Homes coding agent. You cannot run tests, Ruby, Node or any build tool here;
+        CI runs the tests on the PR. If a command is denied, do not retry it or a variant of it. Work only with this
+        repository's files. If a criterion needs a browser, screenshots, a running app, installed packages or another
+        repository, do not search for them: skip that criterion and list it under Assumptions for the reviewer. Do not
+        touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. When you write tests, each
+        assertion must fail if the behaviour it names breaks: never assert only that an object exists or is not nil,
+        loop over data instead of repeating near-identical examples, name each example for what it asserts, and do not
+        add comments explaining the test framework. Follow the repository's CLAUDE.md or AGENTS.md conventions. Commit
+        to the current branch with a subject of 50 characters or fewer. Never run git push; the workflow pushes your
+        branch and opens the pull request.
+      # Bolt's slowest turns run past Claude Code's 10-minute request default, which aborts and retries them.
+      API_TIMEOUT_MS: '1200000'
       # Every model name is the gateway's auto alias, which overflows to a PII-screened cloud tier when the local GPU is full.
       ANTHROPIC_BASE_URL: ${{ vars.LAUREL_GATEWAY_URL }}
       ANTHROPIC_MODEL: auto
@@ -190,6 +207,24 @@ jobs:
           # A review diffs against the base branch, which needs full history.
           fetch-depth: ${{ env.LAUREL_REVIEW == 'true' && '0' || '1' }}
 
+      - name: Fetch Laurel's scripts
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_ISSUE == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Public, so the default token reads it; Laurel's token is scoped to the calling repo.
+          repository: Bloomfield-Homes/.github
+          ref: main
+          path: .laurel-scripts
+          sparse-checkout: laurel
+          persist-credentials: false
+
+      - name: Move the scripts out of the workspace
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_ISSUE == 'true'
+        run: |
+          # Outside the workspace, so no agent reads or commits them.
+          mv .laurel-scripts/laurel "$RUNNER_TEMP/laurel-lib" && rm -rf .laurel-scripts
+          echo "LAUREL_LIB=$RUNNER_TEMP/laurel-lib" >> "$GITHUB_ENV"
+
       - name: List the repo files
         id: files
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_ISSUE == 'true'
@@ -210,7 +245,7 @@ jobs:
         with:
           script: |
             // One chat completion, not an agent run: the agent prompt alone made triage time out.
-            const url = `${process.env.GATEWAY_URL.replace(/\/$/, '')}/v1/chat/completions`;
+            const { chatJSON } = require(`${process.env.LAUREL_LIB}/gateway.js`);
             const issue = context.payload.issue;
             const title = issue.title;
             const body = issue.body || '';
@@ -247,69 +282,25 @@ jobs:
                 'smaller issues, each with a title and its own acceptance criteria. A rough estimate is enough. ' +
                 'Keep the reply short: list at most 12 files, and propose at most 5 issues with at most 4 criteria each.',
             ].join('\n');
-            // One retry covers a truncated reply or a stalled gateway. Node's fetch gives up after 5 minutes
-            // without headers, so two 4-minute attempts fit inside the step timeout.
-            const ATTEMPTS = 2;
-            for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
-              const estimate = await requestEstimate();
-              if (estimate) {
-                core.setOutput('structured_output', JSON.stringify(estimate));
-                core.info(
-                  `Triage: ${(estimate.files || []).length} files, ${estimate.changed_lines} changed lines, ` +
-                    `${(estimate.split || []).length} split issues`,
-                );
-                return;
-              }
-              core.info(`Triage attempt ${attempt} of ${ATTEMPTS} failed`);
+            const estimate = await chatJSON({
+              url: process.env.GATEWAY_URL,
+              key: process.env.GATEWAY_KEY,
+              // The cloud tier directly: one short call should not queue behind the shared GPU. The gateway screens it for PII.
+              model: 'nvidia-super',
+              system: 'You size GitHub issues for a coding agent. Reply with JSON only, matching the schema.',
+              prompt,
+              schema,
+              log: core,
+            });
+            if (!estimate) {
+              core.setFailed('Triage did not return an estimate');
+              return;
             }
-            core.setFailed('Triage did not return an estimate');
-
-            async function requestEstimate() {
-              let data;
-              try {
-                const res = await fetch(url, {
-                  method: 'POST',
-                  headers: {
-                    Authorization: `Bearer ${process.env.GATEWAY_KEY}`,
-                    'Content-Type': 'application/json',
-                  },
-                  signal: AbortSignal.timeout(4 * 60 * 1000),
-                  body: JSON.stringify({
-                    // The cloud tier directly: one short call should not queue behind the shared GPU. The gateway screens it for PII.
-                    model: 'nvidia-super',
-                    temperature: 0,
-                    // Reasoning counts against this cap on the cloud tier.
-                    max_tokens: 16000,
-                    reasoning_effort: 'low',
-                    messages: [
-                      { role: 'system', content: 'You size GitHub issues for a coding agent. Reply with JSON only, matching the schema.' },
-                      { role: 'user', content: prompt },
-                    ],
-                    response_format: { type: 'json_schema', json_schema: { name: 'estimate', schema } },
-                  }),
-                });
-                if (!res.ok) {
-                  core.warning(`Gateway returned ${res.status}`);
-                  return null;
-                }
-                data = await res.json();
-              } catch (e) {
-                core.warning(`Gateway request failed: ${e.message}${e.cause ? ` (${e.cause.code || e.cause.name})` : ''}`);
-                return null;
-              }
-              try {
-                const content = data.choices[0].message.content
-                  .trim()
-                  .replace(/^```(?:json)?\s*/i, '')
-                  .replace(/\s*```$/, '');
-                return JSON.parse(content);
-              } catch (e) {
-                core.warning(
-                  `Triage reply was not JSON: model=${data.model}, finish_reason=${data.choices?.[0]?.finish_reason}, content_length=${(data.choices?.[0]?.message?.content || '').length}, has_reasoning=${Boolean(data.choices?.[0]?.message?.reasoning_content || data.choices?.[0]?.message?.reasoning)}, completion_tokens=${data.usage?.completion_tokens}`,
-                );
-                return null;
-              }
-            }
+            core.setOutput('structured_output', JSON.stringify(estimate));
+            core.info(
+              `Triage: ${(estimate.files || []).length} files, ${estimate.changed_lines} changed lines, ` +
+                `${(estimate.split || []).length} split issues`,
+            );
 
       - name: Enforce the size limit
         id: scope
@@ -430,7 +421,7 @@ jobs:
 
       - name: Run Laurel
         id: laurel
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true' && steps.scope.outputs.oversize != 'true'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true' && env.LAUREL_STAGED != 'true' && steps.scope.outputs.oversize != 'true'
         timeout-minutes: 50
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         with:
@@ -453,7 +444,222 @@ jobs:
             --model auto
             --max-turns 80
             --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
-            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. You cannot run tests, Ruby, Node or any build tool here; CI runs the tests on the PR. If a command is denied, do not retry it or a variant of it. Work only with this repository's files. If a criterion needs a browser, screenshots, a running app, installed packages or another repository, do not search for them: skip that criterion and list it under Assumptions for the reviewer. Start editing as soon as you know which files to change. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. When you write tests, each assertion must fail if the behaviour it names breaks: never assert only that an object exists or is not nil, loop over data instead of repeating near-identical examples, name each example for what it asserts, and do not add comments explaining the test framework. Follow the repository's CLAUDE.md or AGENTS.md conventions. Commit to the current branch with a subject of 50 characters or fewer. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. WORKFLOW RULES, which override any earlier instruction to push, to create a pull request or to give a Create a PR link: your work ends at git commit. Never run git push. Never add a push or pull request item to your checklist, never write a Create a PR link, and never explain how to push or open a pull request. The workflow pushes your branch, opens the pull request and links it in your comment. After you commit, update your comment with these sections and stop. Summary: what changed and why. Files: each file you changed. Assumptions: each assumption, or None. On a pull request, add Review comments: each one with what you changed, or why you declined it."
+            --append-system-prompt "${{ env.LAUREL_RULES }} Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. Start editing as soon as you know which files to change. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. WORKFLOW RULES, which override any earlier instruction to push, to create a pull request or to give a Create a PR link: your work ends at git commit. Never run git push. Never add a push or pull request item to your checklist, never write a Create a PR link, and never explain how to push or open a pull request. The workflow pushes your branch, opens the pull request and links it in your comment. After you commit, update your comment with these sections and stop. Summary: what changed and why. Files: each file you changed. Assumptions: each assumption, or None. On a pull request, add Review comments: each one with what you changed, or why you declined it."
+
+      # Staged path. Each agent stage is a fresh claude-code-action run in agent mode (a prompt, no tracking comment),
+      # so no stage carries an earlier one's conversation. The plan and review live in issue comments tagged with a
+      # hash of the issue body; a rerun on an unchanged issue reuses the plan instead of re-researching.
+      - name: Start the branch
+        id: branch
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true'
+        env:
+          NUMBER: ${{ github.event.issue.number }}
+        run: |
+          name="laurel/issue-$NUMBER-$(date -u +%Y%m%d-%H%M)"
+          git switch -c "$name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Find earlier stages
+        id: stages
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          FILES: ${{ steps.files.outputs.list }}
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const s = require(`${process.env.LAUREL_LIB}/stages.js`);
+            const issue = context.payload.issue;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: issue.number, per_page: 100,
+            });
+            const rev = s.issueRev(issue.body);
+            const plan = s.findStage(comments, 'plan', rev);
+            core.setOutput('rev', rev);
+            core.setOutput('has_plan', plan ? 'true' : 'false');
+            core.setOutput('plan_prompt', s.planPrompt({ issue, files: process.env.FILES }));
+            if (plan) core.notice(`Reusing the plan for issue revision ${rev}.`);
+
+      - name: Plan
+        id: stage_plan
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.stages.outputs.has_plan != 'true'
+        timeout-minutes: 10
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        with:
+          github_token: ${{ steps.app.outputs.token }}
+          anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
+          bot_name: bloomfield-laurel[bot]
+          bot_id: '352642980'
+          settings: '{"permissions":{"deny":["WebFetch","WebSearch"]}}'
+          show_full_output: ${{ github.event.repository.private }}
+          prompt: ${{ steps.stages.outputs.plan_prompt }}
+          claude_args: >-
+            --model auto
+            --max-turns 15
+            --allowedTools "Read,Glob,Grep"
+            --append-system-prompt "${{ env.LAUREL_RULES }}"
+
+      - name: Record the plan
+        id: plan_record
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          EXECUTION_FILE: ${{ steps.stage_plan.outputs.execution_file }}
+          HAS_PLAN: ${{ steps.stages.outputs.has_plan }}
+          REV: ${{ steps.stages.outputs.rev }}
+          ACK_ID: ${{ steps.ack.outputs.comment_id }}
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const s = require(`${process.env.LAUREL_LIB}/stages.js`);
+            const issue = context.payload.issue;
+            const { REV: rev, ACK_ID: ack } = process.env;
+            // The live comment is the acknowledgement; a stop message replaces it rather than adding another.
+            const say = async (body) => ack
+              ? github.rest.issues.updateComment({ ...context.repo, comment_id: Number(ack), body })
+              : github.rest.issues.createComment({ ...context.repo, issue_number: issue.number, body });
+            let plan;
+            if (process.env.HAS_PLAN === 'true') {
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                ...context.repo, issue_number: issue.number, per_page: 100,
+              });
+              plan = s.findStage(comments, 'plan', rev);
+              await say('Laurel is building this from its earlier plan, since the issue has not changed.');
+            } else {
+              const text = s.resultText(process.env.EXECUTION_FILE);
+              const blocked = s.blockedReason(text);
+              if (blocked || !text.includes('## Files')) {
+                await say(`**Laurel could not plan this.** ${blocked || 'The planner returned no plan.'}\n\n` +
+                  '**Next:** edit the issue so the change can be planned from this repository, then remove and ' +
+                  're-add the `laurel` label.');
+                core.setOutput('stop', 'true');
+                return;
+              }
+              const { data: posted } = await github.rest.issues.createComment({
+                ...context.repo, issue_number: issue.number, body: s.stageComment('plan', rev, 'Laurel plan', text),
+              });
+              plan = text;
+              await say(`Laurel planned this ([plan](${posted.html_url})) and is building it.`);
+            }
+            core.setOutput('plan', plan);
+            core.setOutput('build_prompt', s.buildPrompt({ issue, plan }));
+
+      - name: Build
+        id: stage_build
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.plan_record.outputs.stop != 'true'
+        timeout-minutes: 20
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        with:
+          github_token: ${{ steps.app.outputs.token }}
+          anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
+          bot_name: bloomfield-laurel[bot]
+          bot_id: '352642980'
+          settings: '{"permissions":{"deny":["WebFetch","WebSearch"]}}'
+          show_full_output: ${{ github.event.repository.private }}
+          prompt: ${{ steps.plan_record.outputs.build_prompt }}
+          claude_args: >-
+            --model auto
+            --max-turns 25
+            --allowedTools "Read,Edit,Write,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*)"
+            --append-system-prompt "${{ env.LAUREL_RULES }}"
+
+      - name: Review the build
+        id: stage_check
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.plan_record.outputs.stop != 'true'
+        timeout-minutes: 10
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          EXECUTION_FILE: ${{ steps.stage_build.outputs.execution_file }}
+          START_SHA: ${{ steps.checkout.outputs.commit }}
+          PLAN: ${{ steps.plan_record.outputs.plan }}
+          REV: ${{ steps.stages.outputs.rev }}
+          ACK_ID: ${{ steps.ack.outputs.comment_id }}
+          GATEWAY_URL: ${{ vars.LAUREL_GATEWAY_URL }}
+          GATEWAY_KEY: ${{ secrets.LAUREL_GATEWAY_KEY }}
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const s = require(`${process.env.LAUREL_LIB}/stages.js`);
+            const { chatJSON } = require(`${process.env.LAUREL_LIB}/gateway.js`);
+            const issue = context.payload.issue;
+            const { REV: rev, ACK_ID: ack, PLAN: plan, START_SHA: start } = process.env;
+            const say = async (body) => ack
+              ? github.rest.issues.updateComment({ ...context.repo, comment_id: Number(ack), body })
+              : github.rest.issues.createComment({ ...context.repo, issue_number: issue.number, body });
+            const stop = async (why) => {
+              await say(`**Laurel did not build this.** ${why}\n\n**Next:** the plan is in the comment above. ` +
+                'Edit the issue to address this, then remove and re-add the `laurel` label.');
+              core.setOutput('stop', 'true');
+            };
+            const blocked = s.blockedReason(s.resultText(process.env.EXECUTION_FILE));
+            if (blocked) return stop(`The builder stopped: ${blocked}`);
+            const { stdout: count } = await exec.getExecOutput('git', ['rev-list', '--count', `${start}..HEAD`]);
+            if (Number(count.trim()) === 0) return stop('The builder made no commits.');
+
+            const { stdout: diff } = await exec.getExecOutput('git', ['diff', `${start}..HEAD`], { silent: true });
+            const review = await chatJSON({
+              url: process.env.GATEWAY_URL, key: process.env.GATEWAY_KEY, model: 'nvidia-super',
+              system: s.REVIEW_SYSTEM, prompt: s.reviewPrompt({ issue, plan, diff }), schema: s.REVIEW_SCHEMA, log: core,
+            });
+            if (!review) {
+              core.warning('The review did not run; the PR opens without it.');
+              core.setOutput('review_md', '_Laurel could not run its review. Review the change in full._');
+              return;
+            }
+            const md = s.formatReview(review);
+            const { data: posted } = await github.rest.issues.createComment({
+              ...context.repo, issue_number: issue.number, body: s.stageComment('review', rev, 'Laurel review', md),
+            });
+            const fix = s.needsFix(review);
+            await say(`Laurel built and reviewed this ([review](${posted.html_url}))` +
+              (fix ? ' and is fixing what the review found.' : ' and is opening the PR.'));
+            core.setOutput('review_md', md);
+            core.setOutput('needs_fix', fix ? 'true' : 'false');
+            core.setOutput('fix_prompt', s.fixPrompt({ issue, plan, review: md }));
+
+      - name: Fix
+        id: stage_fix
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.stage_check.outputs.needs_fix == 'true'
+        timeout-minutes: 10
+        # A failed fix still leaves the build's commits to push; the PR opens as a draft.
+        continue-on-error: true
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        with:
+          github_token: ${{ steps.app.outputs.token }}
+          anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
+          bot_name: bloomfield-laurel[bot]
+          bot_id: '352642980'
+          settings: '{"permissions":{"deny":["WebFetch","WebSearch"]}}'
+          show_full_output: ${{ github.event.repository.private }}
+          prompt: ${{ steps.stage_check.outputs.fix_prompt }}
+          claude_args: >-
+            --model auto
+            --max-turns 15
+            --allowedTools "Read,Edit,Write,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*)"
+            --append-system-prompt "${{ env.LAUREL_RULES }}"
+
+      - name: Sum up the stages
+        id: staged
+        if: always() && env.LAUREL_STAGED == 'true' && steps.stages.outcome == 'success'
+        env:
+          PLAN: ${{ steps.stage_plan.outcome }}
+          RECORD: ${{ steps.plan_record.outcome }}
+          BUILD: ${{ steps.stage_build.outcome }}
+          CHECK: ${{ steps.stage_check.outcome }}
+          STOP: ${{ steps.plan_record.outputs.stop || steps.stage_check.outputs.stop }}
+          PLAN_FILE: ${{ steps.stage_plan.outputs.execution_file }}
+          BUILD_FILE: ${{ steps.stage_build.outputs.execution_file }}
+        run: |
+          # One outcome for the tidy step: stopped (a stage said why in the live comment), the first failed stage, or success.
+          outcome=success file="$BUILD_FILE"
+          if [ "$STOP" = true ]; then outcome=stopped
+          elif [ "$PLAN" = failure ] || [ "$PLAN" = cancelled ]; then outcome=$PLAN file="$PLAN_FILE"
+          else
+            for o in "$RECORD" "$BUILD" "$CHECK"; do
+              if [ "$o" = failure ] || [ "$o" = cancelled ]; then outcome=$o; break; fi
+            done
+          fi
+          { echo "outcome=$outcome"; echo "execution_file=$file"; } >> "$GITHUB_OUTPUT"
 
       - name: Run Laurel review
         id: review
@@ -476,7 +682,7 @@ jobs:
 
       - name: Push Laurel's branch
         # A failed run (for example max turns) can still leave commits worth keeping.
-        if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome == 'success' || steps.laurel.outcome == 'failure')
+        if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome == 'success' || steps.laurel.outcome == 'failure' || steps.stage_build.outcome == 'success' || steps.stage_build.outcome == 'failure')
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           LAUREL_BOT: bloomfield-laurel[bot]
@@ -515,11 +721,14 @@ jobs:
 
       - name: Enforce small PRs and open the PR
         id: pr
-        if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome == 'success' || steps.laurel.outcome == 'failure')
+        if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome == 'success' || steps.laurel.outcome == 'failure' || steps.stage_build.outcome == 'success' || steps.stage_build.outcome == 'failure')
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          LAUREL_BRANCH: ${{ steps.laurel.outputs.branch_name }}
-          LAUREL_OUTCOME: ${{ steps.laurel.outcome }}
+          LAUREL_BRANCH: ${{ steps.branch.outputs.name || steps.laurel.outputs.branch_name }}
+          # A staged run opens a draft when the build or the fix pass failed.
+          LAUREL_OUTCOME: ${{ steps.laurel.outcome != 'skipped' && steps.laurel.outcome || (steps.stage_build.outcome == 'failure' || steps.stage_fix.outcome == 'failure') && 'failure' || 'success' }}
+          REVIEW_MD: ${{ steps.stage_check.outputs.review_md }}
+          FIX_RAN: ${{ steps.stage_fix.outcome != 'skipped' && steps.stage_fix.outcome != '' }}
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
@@ -609,10 +818,14 @@ jobs:
             const note = stopped
               ? 'Laurel stopped before finishing (the run failed). Review the commits before marking this ready.\n\n'
               : '';
+            const review = process.env.REVIEW_MD
+              ? `\n\n## Laurel review\n${process.env.REVIEW_MD}` +
+                (process.env.FIX_RAN === 'true' ? '\n\nLaurel ran one fix pass after this review.' : '')
+              : '';
             const { data: pr } = await github.rest.pulls.create({
               owner, repo, head, base,
               title: `Laurel: ${issue.title}`.slice(0, 120),
-              body: `${note}Closes #${issue.number}\n\nWritten by Laurel on the local model. A person must review and merge; Laurel never merges.`,
+              body: `${note}Closes #${issue.number}\n\nWritten by Laurel on the local model. A person must review and merge; Laurel never merges.${review}`,
               ...(stopped ? { draft: true } : {}),
             });
             core.setOutput('pr_url', pr.html_url);
@@ -622,15 +835,17 @@ jobs:
             });
 
       - name: Tidy Laurel's comments
-        if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome != 'skipped' || steps.review.outcome != 'skipped')
+        if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome != 'skipped' || steps.review.outcome != 'skipped' || steps.staged.outcome == 'success')
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           CONSOLE_URL: ${{ vars.LAUREL_CONSOLE_URL }}/gh/${{ github.event.repository.name }}/runs/${{ github.run_id }}?issue=${{ github.event.issue.number || github.event.pull_request.number }}
-          OUTCOME: ${{ steps.laurel.outcome != 'skipped' && steps.laurel.outcome || steps.review.outcome }}
+          OUTCOME: ${{ steps.laurel.outcome != 'skipped' && steps.laurel.outcome || steps.review.outcome != 'skipped' && steps.review.outcome || steps.staged.outputs.outcome }}
           STARTED_AT: ${{ steps.start.outputs.at }}
-          EXECUTION_FILE: ${{ steps.review.outputs.execution_file || steps.laurel.outputs.execution_file }}
+          EXECUTION_FILE: ${{ steps.review.outputs.execution_file || steps.laurel.outputs.execution_file || steps.staged.outputs.execution_file }}
           ACK_ID: ${{ steps.ack.outputs.comment_id }}
           PR_URL: ${{ steps.pr.outputs.pr_url }}
+          # The staged path's plan and review for this issue revision stay visible across runs.
+          STAGE_REV: ${{ steps.stages.outputs.rev }}
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
@@ -644,7 +859,8 @@ jobs:
               const since = new Date(process.env.STARTED_AT);
               const mine = comments.filter(c => c.user && c.user.type === 'Bot'
                 && c.user.login.startsWith('bloomfield-laurel'));
-              const older = mine.filter(c => new Date(c.created_at) < since);
+              const current = process.env.STAGE_REV ? ` rev=${process.env.STAGE_REV} -->` : null;
+              const older = mine.filter(c => new Date(c.created_at) < since && !(current && c.body && c.body.includes(current)));
               const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
               // The acknowledgement can hold this run's URL, so it never counts as the tracking comment.
               const tracking = mine.find(c => c.id !== Number(process.env.ACK_ID)
@@ -717,6 +933,9 @@ jobs:
                 } else {
                   await github.rest.issues.createComment({ ...context.repo, issue_number: number, body: note });
                 }
+              } else if (process.env.STAGE_REV && process.env.PR_URL && process.env.ACK_ID) {
+                // A staged run's progress lives in the acknowledgement; once the PR comment exists it is redundant.
+                await github.rest.issues.deleteComment({ ...context.repo, comment_id: Number(process.env.ACK_ID) });
               }
 
               for (const c of older) {
