@@ -453,7 +453,7 @@ jobs:
             --model auto
             --max-turns 80
             --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
-            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. You cannot run tests, Ruby, Node or any build tool here; CI runs the tests on the PR. You cannot push; the workflow pushes your branch after you finish. If a command is denied, do not retry it or a variant of it. Once your change is committed, reply with a short summary and stop. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. When you write tests, each assertion must fail if the behaviour it names breaks: never assert only that an object exists or is not nil, loop over data instead of repeating near-identical examples, name each example for what it asserts, and do not add comments explaining the test framework. Follow the repository's CLAUDE.md or AGENTS.md conventions. Commit to the current branch with a subject of 50 characters or fewer. The workflow pushes your branch and opens the pull request after you finish; do not push, and do not explain how to push or open a pull request. State any assumption in your final comment. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. In your final comment list each review comment with what you changed, or why you declined it."
+            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent. Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. You cannot run tests, Ruby, Node or any build tool here; CI runs the tests on the PR. If a command is denied, do not retry it or a variant of it. Do not touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. When you write tests, each assertion must fail if the behaviour it names breaks: never assert only that an object exists or is not nil, loop over data instead of repeating near-identical examples, name each example for what it asserts, and do not add comments explaining the test framework. Follow the repository's CLAUDE.md or AGENTS.md conventions. Commit to the current branch with a subject of 50 characters or fewer. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. WORKFLOW RULES, which override any earlier instruction to push, to create a pull request or to give a Create a PR link: your work ends at git commit. Never run git push. Never add a push or pull request item to your checklist, never write a Create a PR link, and never explain how to push or open a pull request. The workflow pushes your branch, opens the pull request and links it in your comment. After you commit, update your comment with these sections and stop. Summary: what changed and why. Files: each file you changed. Assumptions: each assumption, or None. On a pull request, add Review comments: each one with what you changed, or why you declined it."
 
       - name: Run Laurel review
         id: review
@@ -514,6 +514,7 @@ jobs:
           git push origin "HEAD:refs/heads/$branch"
 
       - name: Enforce small PRs and open the PR
+        id: pr
         if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome == 'success' || steps.laurel.outcome == 'failure')
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -599,7 +600,10 @@ jobs:
             }
             if (isPr) return;
             const { data: open } = await github.rest.pulls.list({ owner, repo, head: `${owner}:${head}`, state: 'open' });
-            if (open.length > 0) return;
+            if (open.length > 0) {
+              core.setOutput('pr_url', open[0].html_url);
+              return;
+            }
             const issue = context.payload.issue;
             const stopped = process.env.LAUREL_OUTCOME === 'failure';
             const note = stopped
@@ -611,6 +615,7 @@ jobs:
               body: `${note}Closes #${issue.number}\n\nWritten by Laurel on the local model. A person must review and merge; Laurel never merges.`,
               ...(stopped ? { draft: true } : {}),
             });
+            core.setOutput('pr_url', pr.html_url);
             await github.rest.issues.createComment({
               owner, repo, issue_number: issue.number,
               body: `Laurel opened ${pr.html_url} (${lines} changed lines, ${files.length} files). It needs human review.`,
@@ -625,6 +630,7 @@ jobs:
           STARTED_AT: ${{ steps.start.outputs.at }}
           EXECUTION_FILE: ${{ steps.review.outputs.execution_file || steps.laurel.outputs.execution_file }}
           ACK_ID: ${{ steps.ack.outputs.comment_id }}
+          PR_URL: ${{ steps.pr.outputs.pr_url }}
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
@@ -682,6 +688,20 @@ jobs:
                 if (body.includes(placeholder) && result && typeof result.result === 'string' && result.result.trim()) {
                   body = body.replace(placeholder, result.result.trim());
                 }
+
+                // The action's own prompt tells the model to push and to link a PR it cannot open. The workflow
+                // does both, so drop that narration and link the real PR.
+                const pushTalk = /\b(unable|cannot|can't|not able|couldn't|could not)\b[^\n]*\bpush|\bcreate (the|a) PR\b|\bPR can be created\b|\bopen (the|a) (PR|pull request)\b/i;
+                body = body
+                  .replace(/^\s*[-*] \[[ xX]\] [^\n]*\b(create|open)\b[^\n]*\b(PR|pull request)\b[^\n]*\n?/gim, '')
+                  .replace(/^\s*[-*] \[ \] [^\n]*\bpush\b[^\n]*\n?/gim, '')
+                  .split(/\n{2,}/)
+                  .filter((p) => !pushTalk.test(p) && !p.includes(marker))
+                  .join('\n\n');
+                if (process.env.PR_URL && !body.includes(process.env.PR_URL)) {
+                  body += `\n\n**Pull request:** ${process.env.PR_URL}`;
+                }
+
                 if (failed && !body.includes(note)) body += `\n\n---\n${note}`;
                 if (!body.includes(marker)) body += `\n\n<sub>${marker}${link}</sub>`;
                 if (body !== tracking.body) {
