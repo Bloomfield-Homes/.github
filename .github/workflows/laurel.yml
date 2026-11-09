@@ -383,6 +383,51 @@ jobs:
             );
             core.setOutput('oversize', 'true');
 
+      - name: Mark the issue in progress
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_ISSUE == 'true' && steps.scope.outputs.oversize != 'true'
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          PROJECT_NUMBER: '1'
+          STATUS_FIELD: Status
+          STATUS_VALUE: In progress
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            // Adds the issue to the org's Dev project; the project's own workflows move it on from here.
+            const found = await github.graphql(
+              `query($org: String!, $number: Int!, $field: String!) {
+                organization(login: $org) {
+                  projectV2(number: $number) {
+                    id
+                    field(name: $field) { ... on ProjectV2SingleSelectField { id options { id name } } }
+                  }
+                }
+              }`,
+              { org: context.repo.owner, number: Number(process.env.PROJECT_NUMBER), field: process.env.STATUS_FIELD },
+            );
+            const project = found.organization.projectV2;
+            const option = project.field && project.field.options.find((o) => o.name === process.env.STATUS_VALUE);
+            if (!option) {
+              core.warning(`Project ${process.env.PROJECT_NUMBER} has no "${process.env.STATUS_VALUE}" status.`);
+              return;
+            }
+            const added = await github.graphql(
+              `mutation($project: ID!, $content: ID!) {
+                addProjectV2ItemById(input: { projectId: $project, contentId: $content }) { item { id } }
+              }`,
+              { project: project.id, content: context.payload.issue.node_id },
+            );
+            await github.graphql(
+              `mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $project, itemId: $item, fieldId: $field, value: { singleSelectOptionId: $option }
+                }) { projectV2Item { id } }
+              }`,
+              { project: project.id, item: added.addProjectV2ItemById.item.id, field: project.field.id, option: option.id },
+            );
+            core.info(`Issue #${context.payload.issue.number} is in progress on project ${process.env.PROJECT_NUMBER}.`);
+
       - name: Run Laurel
         id: laurel
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true' && steps.scope.outputs.oversize != 'true'
