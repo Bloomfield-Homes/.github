@@ -253,7 +253,8 @@ jobs:
             const body = issue.body || '';
             const schema = {
               type: 'object',
-              required: ['files', 'changed_lines', 'split'],
+              // split is optional: when it was required, a model with nothing to split padded whitespace to the cap.
+              required: ['files', 'changed_lines'],
               properties: {
                 files: { type: 'array', maxItems: 12, items: { type: 'string' } },
                 changed_lines: { type: 'integer' },
