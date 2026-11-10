@@ -716,6 +716,11 @@ jobs:
           if git fetch --depth=1 origin "+refs/heads/$branch:refs/remotes/origin/$branch" 2>/dev/null; then
             base="origin/$branch"
           fi
+          # A fix run on an open PR can end with the branch already ahead of the default but nothing new to push.
+          if [ "$(git rev-list --count "$base..HEAD")" = "0" ]; then
+            echo "::notice::Laurel made no new commits on $branch; nothing to push."
+            exit 0
+          fi
           if git merge-base --is-ancestor "$base" HEAD; then
             export LAUREL_TRAILER="Co-authored-by: $LAUREL_BOT <$LAUREL_BOT_ID+$LAUREL_BOT@users.noreply.github.com>"
             FILTER_BRANCH_SQUELCH_WARNING=1 git filter-branch -f --msg-filter \
