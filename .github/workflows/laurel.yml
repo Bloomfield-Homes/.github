@@ -312,6 +312,7 @@ jobs:
         env:
           TRIAGE: ${{ steps.triage.outputs.structured_output }}
           TRIAGE_OUTCOME: ${{ steps.triage.outcome }}
+          TRIAGE_FAILURE: ${{ steps.triage.outputs.failure }}
           ACK_ID: ${{ steps.ack.outputs.comment_id }}
         with:
           github-token: ${{ steps.app.outputs.token }}
@@ -330,23 +331,22 @@ jobs:
                 });
               }
             };
-            // Failing to size is the signal the issue is too broad, so stop rather than implement.
-            const unsized = async () => {
-              await post(
-                'Laurel could not size this issue, which usually means it is too broad for one PR. ' +
-                  'Narrow it or split it into smaller issues, then label it laurel again.',
-              );
+            const { sizingFailureMessage } = require(`${process.env.LAUREL_LIB}/sizing.js`);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            // No usable estimate is Laurel's failure, not the issue's: say why and stop.
+            const unsized = async (cause) => {
+              await post(sizingFailureMessage(cause, runUrl));
               core.setOutput('oversize', 'true');
             };
             if (process.env.TRIAGE_OUTCOME !== 'success') {
-              await unsized();
+              await unsized(process.env.TRIAGE_FAILURE);
               return;
             }
             let est;
             try {
               est = JSON.parse(process.env.TRIAGE);
             } catch (e) {
-              await unsized();
+              await unsized('not_json');
               return;
             }
             const files = Array.isArray(est && est.files) ? est.files : [];
@@ -356,7 +356,7 @@ jobs:
             // A proposed split means the model judged it oversize, even when it reports zero files or lines.
             if (split.length === 0) {
               if (files.length === 0 || lines <= 0) {
-                await unsized();
+                await unsized('empty');
                 return;
               }
               if (files.length <= MAX_FILES && lines <= MAX_LINES) return;
