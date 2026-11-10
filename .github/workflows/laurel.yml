@@ -39,7 +39,7 @@ jobs:
     runs-on:
       group: laurel
       labels: [self-hosted, laurel]
-    timeout-minutes: 90
+    timeout-minutes: 100
     concurrency:
       group: laurel-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number }}
       cancel-in-progress: false
@@ -487,7 +487,7 @@ jobs:
       - name: Plan
         id: stage_plan
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.stages.outputs.has_plan != 'true'
-        timeout-minutes: 20
+        timeout-minutes: 25
         uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
         with:
           github_token: ${{ steps.app.outputs.token }}
@@ -499,8 +499,9 @@ jobs:
           prompt: ${{ steps.stages.outputs.plan_prompt }}
           claude_args: >-
             --model auto
-            --max-turns 15
+            --max-turns 30
             --allowedTools "Read,Glob,Grep"
+            --disallowedTools "Edit,Write,MultiEdit,NotebookEdit,Bash"
             --append-system-prompt "${{ env.LAUREL_RULES }}"
 
       - name: Record the plan
@@ -686,6 +687,7 @@ jobs:
             --append-system-prompt "You are Laurel, the Bloomfield Homes code reviewer. Review this pull request's diff against its base branch. Do not edit files, commit or push. Report only real problems: bugs, security issues, missing error handling, broken tests, tests that cannot fail, and clear violations of the repository's own conventions. Skip style nits and praise. Post each finding as an inline comment on the exact line with what is wrong and a concrete fix. Then end with a short summary comment that lists the findings by severity, or says you found none. Never quote secrets, credentials or personal data from the code."
 
       - name: Push Laurel's branch
+        id: push
         # A failed run (for example max turns) can still leave commits worth keeping.
         if: always() && steps.auth.outputs.ok == 'true' && (steps.laurel.outcome == 'success' || steps.laurel.outcome == 'failure' || steps.stage_build.outcome == 'success' || steps.stage_build.outcome == 'failure')
         env:
@@ -702,6 +704,7 @@ jobs:
           fi
           if [ "$(git rev-list --count "origin/$DEFAULT_BRANCH..HEAD")" = "0" ]; then
             echo "::notice::Laurel made no commits; nothing to push."
+            echo "no_commits=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
@@ -734,6 +737,7 @@ jobs:
           LAUREL_OUTCOME: ${{ steps.laurel.outcome != 'skipped' && steps.laurel.outcome || (steps.stage_build.outcome == 'failure' || steps.stage_fix.outcome == 'failure') && 'failure' || 'success' }}
           REVIEW_MD: ${{ steps.stage_check.outputs.review_md }}
           FIX_RAN: ${{ steps.stage_fix.outcome != 'skipped' && steps.stage_fix.outcome != '' }}
+          NO_COMMITS: ${{ steps.push.outputs.no_commits }}
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
@@ -754,6 +758,17 @@ jobs:
               core.notice('Laurel produced no branch; nothing to check.');
               return;
             }
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            if (process.env.NO_COMMITS === 'true') {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: number,
+                body: 'Laurel finished without changing anything, so there is no PR. This usually means the issue ' +
+                  `is already done on \`${base}\`. The [run log](${runUrl}) has Laurel's reasoning.\n\n` +
+                  '**Next:** close the issue if it is done. Otherwise add what is missing to the issue, then ' +
+                  'remove and re-add the `laurel` label.',
+              });
+              return;
+            }
             let cmp;
             try {
               ({ data: cmp } = await github.rest.repos.compareCommitsWithBasehead({
@@ -762,7 +777,6 @@ jobs:
             } catch (e) {
               if (e.status !== 404) throw e;
               // GitHub answers 404 both for a missing branch and for one that shares no history with the base.
-              const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
               let pushed = true;
               try {
                 await github.rest.repos.getBranch({ owner, repo, branch: head });
