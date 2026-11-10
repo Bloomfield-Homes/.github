@@ -1,5 +1,5 @@
 # Laurel: Bloomfield Homes coding agent. Repos opt in with one caller workflow. The model is the gateway
-# `auto` alias (triage uses `nvidia-super`). Plan: vault Local-Cowork/Plans/2026-11-04-laurel-github-claude-code-action.md
+# `ripple` alias (triage uses `nvidia-super`). Plan: vault Local-Cowork/Plans/2026-11-04-laurel-github-claude-code-action.md
 # A person's "/laurel review" comment on a PR runs a read-only review instead of the coding agent.
 name: Laurel
 
@@ -67,14 +67,15 @@ jobs:
         branch and opens the pull request.
       # Bolt's slowest turns run past Claude Code's 10-minute request default, which aborts and retries them.
       API_TIMEOUT_MS: '1200000'
-      # Every model name is the gateway's auto alias, which overflows to a PII-screened cloud tier when the local GPU is full.
+      # The agent runs on the gateway's ripple alias: a zero-data-retention cloud model, PII-screened, falling back to
+      # paid NVIDIA and then the local GPU. Small background calls stay on auto, which is the local GPU first.
       ANTHROPIC_BASE_URL: ${{ vars.LAUREL_GATEWAY_URL }}
-      ANTHROPIC_MODEL: auto
-      ANTHROPIC_DEFAULT_OPUS_MODEL: auto
-      ANTHROPIC_DEFAULT_SONNET_MODEL: auto
+      ANTHROPIC_MODEL: ripple
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ripple
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ripple
       ANTHROPIC_DEFAULT_HAIKU_MODEL: auto
       ANTHROPIC_SMALL_FAST_MODEL: auto
-      CLAUDE_CODE_SUBAGENT_MODEL: auto
+      CLAUDE_CODE_SUBAGENT_MODEL: ripple
       # Egress off: telemetry, error reports, updates, feedback, feature flags, web fetch, connectors.
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
       DISABLE_TELEMETRY: '1'
@@ -86,7 +87,7 @@ jobs:
       CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: '1'
       CLAUDE_CODE_DISABLE_ARTIFACT: '1'
       ENABLE_CLAUDEAI_MCP_SERVERS: 'false'
-      # The local model is not Anthropic: no beta headers, no prompt-cache marks.
+      # The gateway's models are not Anthropic: no beta headers, no prompt-cache marks.
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1'
       DISABLE_PROMPT_CACHING: '1'
     steps:
@@ -445,7 +446,7 @@ jobs:
           # The transcript lands in the run log, which anyone who can read the repo can see.
           show_full_output: ${{ github.event.repository.private }}
           claude_args: >-
-            --model auto
+            --model ripple
             --max-turns 80
             --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
             --append-system-prompt "${{ env.LAUREL_RULES }} Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. Start editing as soon as you know which files to change. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. WORKFLOW RULES, which override any earlier instruction to push, to create a pull request or to give a Create a PR link: your work ends at git commit. Never run git push. Never add a push or pull request item to your checklist, never write a Create a PR link, and never explain how to push or open a pull request. The workflow pushes your branch, opens the pull request and links it in your comment. After you commit, update your comment with these sections and stop. Summary: what changed and why. Files: each file you changed. Assumptions: each assumption, or None. On a pull request, add Review comments: each one with what you changed, or why you declined it."
@@ -498,7 +499,7 @@ jobs:
           show_full_output: ${{ github.event.repository.private }}
           prompt: ${{ steps.stages.outputs.plan_prompt }}
           claude_args: >-
-            --model auto
+            --model ripple
             --max-turns 15
             --allowedTools "Read,Glob,Grep"
             --append-system-prompt "${{ env.LAUREL_RULES }}"
@@ -562,7 +563,7 @@ jobs:
           show_full_output: ${{ github.event.repository.private }}
           prompt: ${{ steps.plan_record.outputs.build_prompt }}
           claude_args: >-
-            --model auto
+            --model ripple
             --max-turns 25
             --allowedTools "Read,Edit,Write,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*)"
             --append-system-prompt "${{ env.LAUREL_RULES }}"
@@ -637,7 +638,7 @@ jobs:
           show_full_output: ${{ github.event.repository.private }}
           prompt: ${{ steps.stage_check.outputs.fix_prompt }}
           claude_args: >-
-            --model auto
+            --model ripple
             --max-turns 15
             --allowedTools "Read,Edit,Write,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*)"
             --append-system-prompt "${{ env.LAUREL_RULES }}"
@@ -680,7 +681,7 @@ jobs:
           # The action adds git write tools to every mode; deny wins over allow, so review stays read-only.
           settings: '{"permissions":{"deny":["WebFetch","WebSearch","Bash(git add:*)","Bash(git commit:*)","Bash(git rm:*)","Bash(git push:*)","Bash(*git-push.sh*)"]}}'
           claude_args: >-
-            --model auto
+            --model ripple
             --max-turns 40
             --allowedTools "Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git status:*),Bash(git show:*),mcp__github_inline_comment__create_inline_comment,ToolSearch"
             --append-system-prompt "You are Laurel, the Bloomfield Homes code reviewer. Review this pull request's diff against its base branch. Do not edit files, commit or push. Report only real problems: bugs, security issues, missing error handling, broken tests, tests that cannot fail, and clear violations of the repository's own conventions. Skip style nits and praise. Post each finding as an inline comment on the exact line with what is wrong and a concrete fix. Then end with a short summary comment that lists the findings by severity, or says you found none. Never quote secrets, credentials or personal data from the code."
@@ -830,7 +831,7 @@ jobs:
             const { data: pr } = await github.rest.pulls.create({
               owner, repo, head, base,
               title: `Laurel: ${issue.title}`.slice(0, 120),
-              body: `${note}Closes #${issue.number}\n\nWritten by Laurel on the local model. A person must review and merge; Laurel never merges.${review}`,
+              body: `${note}Closes #${issue.number}\n\nWritten by Laurel through Bloomfield Homes' AI gateway. A person must review and merge; Laurel never merges.${review}`,
               ...(stopped ? { draft: true } : {}),
             });
             core.setOutput('pr_url', pr.html_url);
@@ -901,7 +902,7 @@ jobs:
               const note = `**Laurel did not finish.** ${why}\n\n**Next:** ${next}\n\n[Run log](${runUrl})`;
 
               if (tracking) {
-                const marker = "Laurel runs on Bloomfield Homes' local model.";
+                const marker = "Laurel runs through Bloomfield Homes' AI gateway.";
                 const url = process.env.CONSOLE_URL;
                 const link = url && !url.startsWith('/gh/') ? ` [Watch this run](${url})` : '';
                 let body = tracking.body
