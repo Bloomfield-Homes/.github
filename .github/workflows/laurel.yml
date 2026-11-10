@@ -245,7 +245,7 @@ jobs:
         with:
           script: |
             // One chat completion, not an agent run: the agent prompt alone made triage time out.
-            const { chatJSON } = require(`${process.env.LAUREL_LIB}/gateway.js`);
+            const { chatJSONResult } = require(`${process.env.LAUREL_LIB}/gateway.js`);
             const issue = context.payload.issue;
             const title = issue.title;
             const body = issue.body || '';
@@ -282,7 +282,7 @@ jobs:
                 'smaller issues, each with a title and its own acceptance criteria. A rough estimate is enough. ' +
                 'Keep the reply short: list at most 12 files, and propose at most 5 issues with at most 4 criteria each.',
             ].join('\n');
-            const estimate = await chatJSON({
+            const { reply: estimate, cause } = await chatJSONResult({
               url: process.env.GATEWAY_URL,
               key: process.env.GATEWAY_KEY,
               // The cloud tier directly: one short call should not queue behind the shared GPU. The gateway screens it for PII.
@@ -290,10 +290,13 @@ jobs:
               system: 'You size GitHub issues for a coding agent. Reply with JSON only, matching the schema.',
               prompt,
               schema,
+              // The reply is a short object, so a runaway reply stops fast.
+              maxTokens: 2000,
               log: core,
             });
             if (!estimate) {
-              core.setFailed('Triage did not return an estimate');
+              core.setOutput('failure', cause || '');
+              core.setFailed(`Triage did not return an estimate (${cause})`);
               return;
             }
             core.setOutput('structured_output', JSON.stringify(estimate));

@@ -5,6 +5,9 @@ const ATTEMPTS = 2;
 // Node's fetch gives up after 5 minutes without headers, so two 4-minute attempts fit a 10-minute step.
 const ATTEMPT_MS = 4 * 60 * 1000;
 
+// Enough of a reply that is not JSON to show why, without dumping all of it.
+const LOGGED_CHARS = 500;
+
 function parseContent(data) {
   const content = data.choices[0].message.content
     .trim()
@@ -13,6 +16,7 @@ function parseContent(data) {
   return JSON.parse(content);
 }
 
+/** { reply } on success, else { cause }: timeout, network, http <status>, length or not_json. */
 async function request({ url, key, model, system, prompt, schema, maxTokens, log, fetchImpl }) {
   let data;
   try {
@@ -35,33 +39,42 @@ async function request({ url, key, model, system, prompt, schema, maxTokens, log
     });
     if (!res.ok) {
       log.warning(`Gateway returned ${res.status}`);
-      return null;
+      return { cause: `http ${res.status}` };
     }
     data = await res.json();
   } catch (e) {
     log.warning(`Gateway request failed: ${e.message}${e.cause ? ` (${e.cause.code || e.cause.name})` : ''}`);
-    return null;
+    return { cause: e.name === 'TimeoutError' ? 'timeout' : 'network' };
   }
   try {
-    return parseContent(data);
+    return { reply: parseContent(data) };
   } catch (e) {
     const choice = data.choices?.[0];
+    const content = choice?.message?.content || '';
     log.warning(
       `Reply was not JSON: model=${data.model}, finish_reason=${choice?.finish_reason}, ` +
-        `content_length=${(choice?.message?.content || '').length}, completion_tokens=${data.usage?.completion_tokens}`,
+        `content_length=${content.length}, completion_tokens=${data.usage?.completion_tokens}`,
     );
-    return null;
+    log.info(`Reply starts: ${JSON.stringify(content.slice(0, LOGGED_CHARS))}`);
+    return { cause: choice?.finish_reason === 'length' ? 'length' : 'not_json' };
   }
 }
 
-/** The parsed JSON reply, or null after ATTEMPTS failed tries. A truncated reply or a stalled gateway is retried. */
-async function chatJSON({ url, key, model, system, prompt, schema, maxTokens = 16000, log = console, fetchImpl = fetch }) {
+/** { reply } from the first good attempt, else { reply: null, cause } from the last. Every failure is retried. */
+async function chatJSONResult({ url, key, model, system, prompt, schema, maxTokens = 16000, log = console, fetchImpl = fetch }) {
+  let cause;
   for (let attempt = 1; attempt <= ATTEMPTS; attempt += 1) {
-    const reply = await request({ url, key, model, system, prompt, schema, maxTokens, log, fetchImpl });
-    if (reply) return reply;
+    const result = await request({ url, key, model, system, prompt, schema, maxTokens, log, fetchImpl });
+    if (result.reply) return result;
+    cause = result.cause;
     log.info(`Attempt ${attempt} of ${ATTEMPTS} failed`);
   }
-  return null;
+  return { reply: null, cause };
 }
 
-module.exports = { chatJSON, ATTEMPTS };
+/** The parsed JSON reply, or null after ATTEMPTS failed tries. */
+async function chatJSON(options) {
+  return (await chatJSONResult(options)).reply;
+}
+
+module.exports = { chatJSON, chatJSONResult, ATTEMPTS };
