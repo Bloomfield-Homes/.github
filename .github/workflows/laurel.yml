@@ -67,8 +67,6 @@ jobs:
         branch and opens the pull request.
       # Bolt's slowest turns run past Claude Code's 10-minute request default, which aborts and retries them.
       API_TIMEOUT_MS: '1200000'
-      # Caps each turn's output, reasoning included: one runaway Bolt turn of 9,800 tokens took 8 minutes.
-      CLAUDE_CODE_MAX_OUTPUT_TOKENS: '4096'
       # Every model name is the gateway's auto alias, which overflows to a PII-screened cloud tier when the local GPU is full.
       ANTHROPIC_BASE_URL: ${{ vars.LAUREL_GATEWAY_URL }}
       ANTHROPIC_MODEL: auto
