@@ -872,10 +872,13 @@ jobs:
               ? `\n\n## Laurel review\n${process.env.REVIEW_MD}` +
                 (process.env.FIX_RAN === 'true' ? '\n\nLaurel ran one fix pass after this review.' : '')
               : '';
+            // An evidence block in the issue asks the repo's PR evidence job to capture screenshots and exports.
+            const block = ((issue.body || '').match(/<!--\s*evidence[ \t]*\r?\n[\s\S]*?-->/) || [''])[0];
+            const evidence = block ? `\n\n## Screenshots\n\n${block}\nCaptured by CI from this block.` : '';
             const { data: pr } = await github.rest.pulls.create({
               owner, repo, head, base,
               title: `Laurel: ${issue.title}`.slice(0, 120),
-              body: `${note}Closes #${issue.number}\n\nWritten by Laurel on the local model. A person must review and merge; Laurel never merges.${review}`,
+              body: `${note}Closes #${issue.number}\n\nWritten by Laurel on the local model. A person must review and merge; Laurel never merges.${review}${evidence}`,
               ...(stopped ? { draft: true } : {}),
             });
             core.setOutput('pr_url', pr.html_url);
