@@ -1,0 +1,66 @@
+# PR evidence: fails a PR that changes user-visible or export files without screenshots or an example file.
+# Repos opt in with a caller that passes path patterns. Rules: each repo's CLAUDE.md, "PR evidence".
+name: PR evidence
+
+on:
+  workflow_call:
+    inputs:
+      ui_pattern:
+        description: JS regex matching changed paths a user can see (pages, PDF and email templates).
+        type: string
+        required: true
+      export_pattern:
+        description: JS regex matching changed paths that build an export or download. Empty matches nothing.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  check:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch the check
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Public, so the caller's default token reads it.
+          repository: Bloomfield-Homes/.github
+          ref: main
+          path: .pr-evidence
+          sparse-checkout: pr-evidence
+          persist-credentials: false
+
+      - name: Check the PR description
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          UI_PATTERN: ${{ inputs.ui_pattern }}
+          EXPORT_PATTERN: ${{ inputs.export_pattern }}
+        with:
+          script: |
+            const { evidenceProblems } = require(`${process.env.GITHUB_WORKSPACE}/.pr-evidence/pr-evidence/check.js`);
+            const { owner, repo } = context.repo;
+            const pull_number = context.payload.pull_request.number;
+
+            // Read the body fresh: a person or job may have added evidence after this event fired.
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number });
+            const files = (await github.paginate(github.rest.pulls.listFiles, { owner, repo, pull_number, per_page: 100 }))
+              .filter((f) => f.status !== 'removed')
+              .map((f) => f.filename);
+
+            const problems = evidenceProblems({
+              body: pr.body,
+              files,
+              uiPattern: process.env.UI_PATTERN,
+              exportPattern: process.env.EXPORT_PATTERN,
+            });
+            if (!problems.length) {
+              core.info('PR evidence present.');
+              return;
+            }
+            const message = `${problems.join('\n\n')}\n\nRules: the "PR evidence" section of this repo's CLAUDE.md.`;
+            await core.summary.addRaw(message).write();
+            core.setFailed(message);
