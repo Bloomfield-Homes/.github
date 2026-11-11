@@ -1,0 +1,211 @@
+# Lots evidence: on a PR whose description has an <!-- evidence --> block, boots the Lots stack on synthetic data,
+# captures what the block asks for with lots-api's bin/pr-evidence, before (staging) and after (this PR), puts the
+# files on a pr-evidence/<number> branch and fills the description's Screenshots and Example files sections.
+# Deletes that branch when the PR closes. Rules: each Lots repo's CLAUDE.md, "PR evidence".
+name: Lots evidence
+
+on:
+  workflow_call:
+    secrets:
+      LAUREL_APP_PRIVATE_KEY:
+        required: true
+      RAILS_MASTER_KEY:
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  capture:
+    if: >-
+      github.event.action != 'closed' && github.event.pull_request.draft == false &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.body, '<!-- evidence')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency:
+      group: lots-evidence-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    # An explicit shell adds pipefail, so a failed verify-stack stops its step despite the tee.
+    defaults:
+      run:
+        shell: bash
+    env:
+      PR: ${{ github.event.pull_request.number }}
+      REPO: ${{ github.repository }}
+      OUT: ${{ github.workspace }}/evidence
+      BODY: ${{ github.workspace }}/body.md
+      # Makes bin/pr-evidence install Chromium's system packages.
+      CI: 'true'
+      RAILS_MASTER_KEY: ${{ secrets.RAILS_MASTER_KEY }}
+    steps:
+      - name: Decide whether to capture
+        id: decide
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            // A description edit recaptures only when it changed the evidence block itself.
+            const block = (body) => ((body || '').match(/<!--\s*evidence[ \t]*\r?\n[\s\S]*?-->/) || [''])[0];
+            const { action, pull_request: pr, changes } = context.payload;
+            const run = action !== 'edited' || !changes?.body || block(changes.body.from) !== block(pr.body);
+            core.setOutput('run', String(run));
+            if (!run) core.info('The edit left the evidence block unchanged.');
+
+      - name: Mint a token that reads both Lots repos
+        id: app
+        if: steps.decide.outputs.run == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.LAUREL_APP_CLIENT_ID }}
+          private-key: ${{ secrets.LAUREL_APP_PRIVATE_KEY }}
+          owner: Bloomfield-Homes
+          repositories: lots-api,Lots-front-end
+          permission-contents: read
+
+      - name: Pick the refs
+        id: refs
+        if: steps.decide.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          NAME: ${{ github.event.repository.name }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # This PR's repo runs at its head. The other repo runs at a branch of the same name when one exists,
+          # so a paired api and front-end change is captured together, else at staging.
+          if [ "${NAME,,}" = lots-api ]; then other=Lots-front-end; else other=lots-api; fi
+          other_ref=staging
+          if gh api "repos/Bloomfield-Homes/$other/branches/$HEAD_REF" --silent 2>/dev/null; then other_ref="$HEAD_REF"; fi
+          if [ "${NAME,,}" = lots-api ]; then
+            { echo "api=$HEAD_SHA"; echo "fe=$other_ref"; } >> "$GITHUB_OUTPUT"
+          else
+            { echo "api=$other_ref"; echo "fe=$HEAD_SHA"; } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out staging and this PR
+        if: steps.decide.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          API_REF: ${{ steps.refs.outputs.api }}
+          FE_REF: ${{ steps.refs.outputs.fe }}
+        run: |
+          fetch() {
+            git init -q "$1"
+            git -C "$1" fetch -q --depth 1 "https://x-access-token:$GH_TOKEN@github.com/Bloomfield-Homes/$2.git" "$3"
+            git -C "$1" checkout -q FETCH_HEAD
+          }
+          fetch api-base lots-api staging
+          fetch fe-base Lots-front-end staging
+          fetch api lots-api "$API_REF"
+          fetch fe Lots-front-end "$FE_REF"
+
+      - run: corepack enable
+        if: steps.decide.outputs.run == 'true'
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.decide.outputs.run == 'true'
+        with:
+          node-version: 22.23.4
+
+      - name: Install the PDF renderer and read the description
+        if: steps.decide.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sudo apt-get install -y -qq poppler-utils >/dev/null
+          gh pr view "$PR" --repo "$REPO" --json body -q .body > "$BODY"
+          # Compose bind-mounts data/mssql. SQL Server runs as uid 10001 and cannot write a directory Docker creates as root.
+          for dir in api-base api; do
+            mkdir -p "$dir/data/mssql"
+            sudo chown 10001:0 "$dir/data/mssql"
+          done
+
+      - name: Start Gotenberg for PDF exports
+        if: steps.decide.outputs.run == 'true'
+        run: docker compose -p lots-api -f api/docker-compose.yml up -d gotenberg
+
+      # Each checkout gets its own Ruby: staging and this PR can pin different versions.
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        if: steps.decide.outputs.run == 'true'
+        with:
+          working-directory: api-base
+          bundler-cache: true
+
+      # verify-stack seeds Lots_seed whenever it is empty, so each boot has synthetic data.
+      - name: Capture before (staging)
+        if: steps.decide.outputs.run == 'true'
+        continue-on-error: true
+        working-directory: api-base
+        run: |
+          bin/verify-stack --seed --frontend "$GITHUB_WORKSPACE/fe-base" | tee "$RUNNER_TEMP/before.txt"
+          app="$(sed -n 's/^APP //p' "$RUNNER_TEMP/before.txt")"
+          status=0
+          "$GITHUB_WORKSPACE/api/bin/pr-evidence" capture before "$app" "$OUT" < "$BODY" || status=$?
+          bin/verify-stack --stop
+          exit "$status"
+
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        if: steps.decide.outputs.run == 'true'
+        with:
+          working-directory: api
+          bundler-cache: true
+
+      - name: Capture after (this PR)
+        if: steps.decide.outputs.run == 'true'
+        working-directory: api
+        run: |
+          bin/verify-stack --seed --frontend "$GITHUB_WORKSPACE/fe" | tee "$RUNNER_TEMP/after.txt"
+          app="$(sed -n 's/^APP //p' "$RUNNER_TEMP/after.txt")"
+          status=0
+          bin/pr-evidence capture after "$app" "$OUT" < "$BODY" || status=$?
+          bin/verify-stack --stop
+          exit "$status"
+
+      - name: Save the logs
+        if: failure() && steps.decide.outputs.run == 'true'
+        run: docker logs lots-api-db-1 > "$RUNNER_TEMP/db.log" 2>&1 || true
+
+      - name: Upload the logs
+        if: failure() && steps.decide.outputs.run == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lots-evidence-logs
+          path: |
+            api-base/log/verify-stack-*.log
+            api/log/verify-stack-*.log
+            ${{ runner.temp }}/db.log
+
+      - name: Publish and fill the description
+        if: always() && steps.decide.outputs.run == 'true' && hashFiles('evidence/*-manifest.json') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BOT_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          # The Actions token cannot upload PR attachments, so the files live on a one-commit branch per PR
+          # and the description links them by commit.
+          git -C "$OUT" init -q -b "pr-evidence/$PR"
+          git -C "$OUT" add -A
+          git -C "$OUT" -c user.name='github-actions[bot]' -c user.email="$BOT_EMAIL" commit -q -m "Evidence for #$PR"
+          git -C "$OUT" push -q --force "https://x-access-token:$GH_TOKEN@github.com/$REPO.git" "pr-evidence/$PR"
+          base_url="$GITHUB_SERVER_URL/$REPO/blob/$(git -C "$OUT" rev-parse HEAD)"
+
+          gh pr view "$PR" --repo "$REPO" --json body -q .body > "$BODY"
+          ruby api/bin/pr-evidence body "$OUT" "$base_url" < "$BODY" > "$RUNNER_TEMP/body.md"
+          gh pr edit "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/body.md"
+
+  cleanup:
+    if: github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REF: repos/${{ github.repository }}/git/refs/heads/pr-evidence/${{ github.event.pull_request.number }}
+    steps:
+      - name: Delete the evidence branch if the PR has one
+        run: |
+          if gh api "$REF" --silent 2>/dev/null; then
+            gh api -X DELETE "$REF"
+          else
+            echo "No evidence branch for this PR."
+          fi
