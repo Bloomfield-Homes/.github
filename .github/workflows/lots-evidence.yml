@@ -100,12 +100,6 @@ jobs:
           fetch api lots-api "$API_REF"
           fetch fe Lots-front-end "$FE_REF"
 
-      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
-        if: steps.decide.outputs.run == 'true'
-        with:
-          working-directory: api
-          bundler-cache: true
-
       - run: corepack enable
         if: steps.decide.outputs.run == 'true'
 
@@ -127,22 +121,35 @@ jobs:
             sudo chown 10001:0 "$dir/data/mssql"
           done
 
-      # verify-stack seeds Lots_seed on the first boot and only migrates it on the second, so both runs share data.
+      - name: Start Gotenberg for PDF exports
+        if: steps.decide.outputs.run == 'true'
+        run: docker compose -p lots-api -f api/docker-compose.yml up -d gotenberg
+
+      # Each checkout gets its own Ruby: staging and this PR can pin different versions.
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        if: steps.decide.outputs.run == 'true'
+        with:
+          working-directory: api-base
+          bundler-cache: true
+
+      # verify-stack seeds Lots_seed whenever it is empty, so each boot has synthetic data.
       - name: Capture before (staging)
         if: steps.decide.outputs.run == 'true'
         continue-on-error: true
         working-directory: api-base
-        env:
-          BUNDLE_PATH: ${{ github.workspace }}/api/vendor/bundle
         run: |
-          bundle install --quiet
           bin/verify-stack --seed --frontend "$GITHUB_WORKSPACE/fe-base" | tee "$RUNNER_TEMP/before.txt"
-          docker compose -p lots-api -f docker-compose.yml up -d gotenberg
           app="$(sed -n 's/^APP //p' "$RUNNER_TEMP/before.txt")"
           status=0
           "$GITHUB_WORKSPACE/api/bin/pr-evidence" capture before "$app" "$OUT" < "$BODY" || status=$?
           bin/verify-stack --stop
           exit "$status"
+
+      - uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        if: steps.decide.outputs.run == 'true'
+        with:
+          working-directory: api
+          bundler-cache: true
 
       - name: Capture after (this PR)
         if: steps.decide.outputs.run == 'true'
