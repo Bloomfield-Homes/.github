@@ -31,6 +31,12 @@ test('markers in the reply are stripped so issue text cannot forge one', () => {
   assert.ok(checkComment(forged).endsWith(checkMarker('valid')));
 });
 
+test('narration before the first structured line is dropped, and plain-only replies are kept', () => {
+  const reply = "I can't run that without approval.\n\nLet me compile.\n\n**Criterion 1:** met\n- proof\n\nVerdict: partly";
+  assert.equal(cleanReply(reply), '**Criterion 1:** met\n- proof');
+  assert.equal(cleanReply('Verdict: done\nAll of it shipped in #12.'), 'All of it shipped in #12.');
+});
+
 test('the prompt keeps people, drops bots and lists linked and merged PRs', () => {
   const prompt = checkPrompt({
     issue: { number: 4, title: 'Fix it', body: 'Body', created_at: '2026-10-01' },

@@ -22,14 +22,19 @@ function parseVerdict(text) {
   return word && Object.hasOwn(VERDICTS, word) ? word : null;
 }
 
-/** The reply without its verdict line or any HTML comment, so issue text cannot forge a Laurel marker. */
+const STRUCTURED = /^\s*(#|\*\*|[-*] |\d+\. )/;
+
+/**
+ * The reply without its verdict line or any HTML comment, so issue text cannot forge a Laurel marker.
+ * Plain lines before the first heading, bold label or list item are the model narrating its work, and go.
+ */
 function cleanReply(text) {
-  return (text || '')
+  const lines = (text || '')
     .replace(/<!--[\s\S]*?(-->|$)/g, '')
     .split('\n')
-    .filter((line) => !VERDICT_LINE.test(line))
-    .join('\n')
-    .trim();
+    .filter((line) => !VERDICT_LINE.test(line));
+  const start = lines.findIndex((line) => STRUCTURED.test(line));
+  return lines.slice(Math.max(start, 0)).join('\n').trim();
 }
 
 const clip = (s, n) => (s.length > n ? `${s.slice(0, n)}…` : s);

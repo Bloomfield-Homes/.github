@@ -1201,9 +1201,10 @@ jobs:
           settings: '{"permissions":{"deny":["WebFetch","WebSearch","Bash(git add:*)","Bash(git commit:*)","Bash(git rm:*)","Bash(git push:*)","Bash(*git-push.sh*)"]}}'
           show_full_output: ${{ github.event.repository.private }}
           prompt: ${{ steps.gather.outputs.prompt }}
+          # The first real check took 37 turns; the action fails a run that goes past the cap even when it finished.
           claude_args: >-
             --model auto
-            --max-turns 30
+            --max-turns 60
             --allowedTools "Read,Glob,Grep,Bash(git log:*),Bash(git show:*),Bash(git diff:*)"
             --disallowedTools "Edit,Write,MultiEdit,NotebookEdit"
             --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent, checking whether an issue still needs doing. You cannot run tests, the app or any build tool. Work only with this repository's files and git history. Never quote secrets, credentials or personal data from the code."
