@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { sizingFailureMessage } = require('./sizing');
+const { withinLimit, sizingFailureMessage } = require('./sizing');
 
 const run = 'https://github.com/o/r/actions/runs/1';
 
@@ -23,3 +23,11 @@ for (const [cause, phrase] of [
     assert.ok(!message.includes('too broad for one PR'), message);
   });
 }
+
+test('withinLimit takes up to 10 files, or up to 20 when the change is 100 lines or fewer', () => {
+  const cases = [
+    [10, 300, true], [11, 300, false], [1, 301, false],
+    [12, 40, true], [20, 100, true], [21, 40, false], [12, 101, false],
+  ];
+  for (const [files, lines, want] of cases) assert.equal(withinLimit(files, lines), want, `${files} files, ${lines} lines`);
+});
