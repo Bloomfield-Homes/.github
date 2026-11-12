@@ -1,25 +1,36 @@
 // "/laurel check" asks Laurel whether an issue still needs doing. Laurel reads the code and history, never
-// edits, and posts a verdict comment ending in <!-- laurel:check <verdict> --> so a client can show it.
+// edits, and posts a verdict comment ending in <!-- laurel:check <verdict> [met=1,3] --> so a client can
+// show it. `met` lists the acceptance criteria already met, by position, for "/laurel trim".
 
 const VERDICTS = {
   valid: { label: 'Still needed', next: 'Nothing in the code meets it yet.' },
-  partly: { label: 'Partly done', next: 'Consider trimming the issue to what is left.' },
+  partly: { label: 'Partly done', next: 'Comment `/laurel trim` to move the met criteria out of the issue.' },
   done: { label: 'Already done', next: 'Consider closing it as completed.' },
   obsolete: { label: 'No longer applies', next: 'Consider closing it as not planned.' },
   unclear: { label: 'Cannot tell from the code', next: 'A person needs to check what the code cannot show.' },
 };
 
 const VERDICT_LINE = /^[\s*_>#-]*verdict[\s*_]*:[\s*_]*([a-z]+)/im;
+const MET_LINE = /^[\s*_>#-]*met[\s*_]*:[\s*_]*([^\n]*)/im;
 const MAX_LIST = 40;
 const MAX_COMMENT = 2000;
+const MAX_CRITERION = 50;
 
-/** The hidden marker a client reads. The verdict is one of a fixed set of words, so it cannot break out. */
-const checkMarker = (verdict) => `<!-- laurel:check ${verdict} -->`;
+/** The hidden marker a client reads. It holds only a known word and digits, so it cannot break out. */
+const checkMarker = (verdict, met = []) =>
+  `<!-- laurel:check ${verdict}${met.length ? ` met=${met.join(',')}` : ''} -->`;
 
 /** The verdict word from the agent's final reply, or null when it gave none we know. */
 function parseVerdict(text) {
   const word = (text || '').match(VERDICT_LINE)?.[1]?.toLowerCase();
   return word && Object.hasOwn(VERDICTS, word) ? word : null;
+}
+
+/** Criterion numbers from the reply's "Met:" line, sorted and unique. "none" or no line gives []. */
+function parseMet(text) {
+  const line = (text || '').match(MET_LINE)?.[1] || '';
+  const nums = (line.match(/\d+/g) || []).map(Number).filter((n) => n >= 1 && n <= MAX_CRITERION);
+  return [...new Set(nums)].sort((a, b) => a - b);
 }
 
 const STRUCTURED = /^\s*(#|\*\*|[-*] |\d+\. )/;
@@ -32,7 +43,7 @@ function cleanReply(text) {
   const lines = (text || '')
     .replace(/<!--[\s\S]*?(-->|$)/g, '')
     .split('\n')
-    .filter((line) => !VERDICT_LINE.test(line));
+    .filter((line) => !VERDICT_LINE.test(line) && !MET_LINE.test(line));
   const start = lines.findIndex((line) => STRUCTURED.test(line));
   return lines.slice(Math.max(start, 0)).join('\n').trim();
 }
@@ -66,6 +77,7 @@ function checkPrompt({ issue, comments = [], linked = [], merged = [] }) {
     '',
     'Reply in exactly this shape and nothing else:',
     'Verdict: valid | partly | done | obsolete | unclear',
+    'Met: the numbers of the acceptance criteria already met, counting from 1 in the order listed, or none',
     '## Evidence',
     '- one line per criterion: met, not met or cannot tell, with a file path or commit or PR as proof',
     '## Next',
@@ -80,7 +92,11 @@ function checkPrompt({ issue, comments = [], linked = [], merged = [] }) {
 /** The comment Laurel posts. A reply with no known verdict is reported as unclear. */
 function checkComment(text) {
   const verdict = parseVerdict(text) || 'unclear';
-  const { label, next } = VERDICTS[verdict];
+  const met = verdict === 'partly' ? parseMet(text) : [];
+  const { label } = VERDICTS[verdict];
+  const next = verdict === 'partly' && met.length === 0
+    ? 'Laurel did not say which criteria are met, so there is nothing to trim.'
+    : VERDICTS[verdict].next;
   const reply = cleanReply(text) || 'Laurel gave no reasoning. Comment `/laurel check` to try again.';
   return [
     `**Laurel check: ${label}.** ${next}`,
@@ -89,8 +105,8 @@ function checkComment(text) {
     '',
     'Laurel only read the code. It changed nothing and leaves closing the issue to you.',
     '',
-    checkMarker(verdict),
+    checkMarker(verdict, met),
   ].join('\n');
 }
 
-module.exports = { VERDICTS, checkMarker, parseVerdict, cleanReply, checkPrompt, checkComment };
+module.exports = { VERDICTS, checkMarker, parseVerdict, parseMet, cleanReply, checkPrompt, checkComment };
