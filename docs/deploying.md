@@ -47,6 +47,9 @@ Add this job to the repo's release workflow, after the job named `release` that 
 | `DOKPLOY_AZURE_URL`, `DOKPLOY_ONPREM_URL` | variable | org |
 | `DOKPLOY_AZURE_API_KEY`, `DOKPLOY_ONPREM_API_KEY` | secret | org |
 | `DOKPLOY_PROD_ID`, `DOKPLOY_STANDBY_ID`, `DOKPLOY_STAGING_ID` | variable | repo |
+| `POSTHOG_CLI_API_KEY` | secret, optional | repo or org |
+
+`POSTHOG_CLI_API_KEY` reaches the build as the BuildKit secret `posthog_cli_api_key`, for uploading source maps to PostHog. A Dockerfile reads it with `RUN --mount=type=secret,id=posthog_cli_api_key`, so it never lands in an image layer. Without it no secret is passed, and a Dockerfile that never mounts it is unaffected.
 
 Run the setup script from a checkout of this repo:
 
