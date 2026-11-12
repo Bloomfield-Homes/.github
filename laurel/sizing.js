@@ -13,7 +13,7 @@ function sizingFailureMessage(cause, runUrl) {
   if (cause === 'http 429') why = 'the gateway refused the call because Laurel had too many requests in flight';
   else if (/^http \d+$/.test(cause || '')) why = `the gateway returned HTTP ${cause.slice(5)}`;
   return `**Laurel could not size this issue:** ${why}. This is a problem on Laurel's side, not a sign the ` +
-    `issue is too broad.\n\n**Next:** remove and re-add the \`laurel\` label to retry.\n\n[Run log](${runUrl})`;
+    `issue is too broad.\n\n**Next:** comment \`/laurel retry\`.\n\n[Run log](${runUrl})\n\n<!-- laurel:retry -->`;
 }
 
 module.exports = { sizingFailureMessage };
