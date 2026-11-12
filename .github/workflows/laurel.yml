@@ -5,6 +5,8 @@
 # can be retried as it stands, so a client may offer a button that posts that comment.
 # "/laurel split" on an oversize issue opens Laurel's proposed split as sub-issues (the `split` job). The size
 # comment that proposes a split carries <!-- laurel:split ... -->, so a client may offer a Split button too.
+# "/laurel check" on an issue asks whether it still needs doing (the `check` job). Laurel reads the code and
+# posts a verdict ending in <!-- laurel:check valid|partly|done|obsolete|unclear -->; it never edits or closes.
 name: Laurel
 
 on:
@@ -32,7 +34,8 @@ jobs:
     if: >-
       (github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'laurel') ||
       (github.event_name == 'issue_comment' && github.event.sender.type == 'User' &&
-        startsWith(github.event.comment.body, '/laurel') && !startsWith(github.event.comment.body, '/laurel split')) ||
+        startsWith(github.event.comment.body, '/laurel') && !startsWith(github.event.comment.body, '/laurel split') &&
+        !(github.event.issue.pull_request == null && startsWith(github.event.comment.body, '/laurel check'))) ||
       (github.event_name == 'pull_request_review_comment' && github.event.sender.type == 'User' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         startsWith(github.event.comment.body, '/laurel')) ||
@@ -1080,3 +1083,144 @@ jobs:
               `Laurel opened ${opened.map((n) => `#${n}`).join(', ')} as sub-issues of this one. ` +
                 'Label each part `laurel` when it is ready to start; later parts may build on earlier ones.',
             );
+
+  check:
+    # A person's "/laurel check" comment on an issue. Laurel reads the code and history read-only and posts
+    # a verdict on whether the issue still needs doing. It never edits, commits, labels or closes.
+    if: >-
+      github.event_name == 'issue_comment' && github.event.sender.type == 'User' &&
+      github.event.issue.pull_request == null && startsWith(github.event.comment.body, '/laurel check')
+    runs-on:
+      group: laurel
+      labels: [self-hosted, laurel]
+    timeout-minutes: 30
+    concurrency:
+      group: laurel-check-${{ github.repository }}-${{ github.event.issue.number }}
+      cancel-in-progress: true
+    env:
+      ANTHROPIC_BASE_URL: ${{ vars.LAUREL_GATEWAY_URL }}
+      ANTHROPIC_MODEL: auto
+      ANTHROPIC_DEFAULT_OPUS_MODEL: auto
+      ANTHROPIC_DEFAULT_SONNET_MODEL: auto
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: auto
+      ANTHROPIC_SMALL_FAST_MODEL: auto
+      CLAUDE_CODE_SUBAGENT_MODEL: auto
+      API_TIMEOUT_MS: '1200000'
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+      DISABLE_TELEMETRY: '1'
+      DISABLE_ERROR_REPORTING: '1'
+      DISABLE_AUTOUPDATER: '1'
+      DISABLE_FEEDBACK_COMMAND: '1'
+      DO_NOT_TRACK: '1'
+      CLAUDE_CODE_DISABLE_WEB_FETCH: '1'
+      CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: '1'
+      CLAUDE_CODE_DISABLE_ARTIFACT: '1'
+      ENABLE_CLAUDEAI_MCP_SERVERS: 'false'
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1'
+      DISABLE_PROMPT_CACHING: '1'
+    steps:
+      - name: Mint Laurel installation token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.LAUREL_APP_CLIENT_ID }}
+          private-key: ${{ secrets.LAUREL_APP_PRIVATE_KEY }}
+
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.app.outputs.token }}
+          # History since the issue opened is part of the evidence.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch Laurel's scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Bloomfield-Homes/.github
+          ref: main
+          path: .laurel-scripts
+          sparse-checkout: laurel
+          persist-credentials: false
+
+      - name: Move the scripts out of the workspace
+        run: |
+          mv .laurel-scripts/laurel "$RUNNER_TEMP/laurel-lib" && rm -rf .laurel-scripts
+          echo "LAUREL_LIB=$RUNNER_TEMP/laurel-lib" >> "$GITHUB_ENV"
+
+      - name: Gather the issue's history
+        id: gather
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const issue = context.payload.issue;
+            const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner, repo, username: context.actor,
+            });
+            if (!['admin', 'write'].includes(perm.permission)) {
+              core.notice(`${context.actor} has ${perm.permission} access; a check needs a person with write access.`);
+              core.setOutput('ok', 'false');
+              return;
+            }
+            const { data: ack } = await github.rest.issues.createComment({
+              owner, repo, issue_number: issue.number,
+              body: 'Laurel is reading the code to check whether this issue still needs doing.',
+            });
+            core.setOutput('ack', String(ack.id));
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: issue.number, per_page: 100,
+            });
+            const timeline = await github.paginate(github.rest.issues.listEventsForTimeline, {
+              owner, repo, issue_number: issue.number, per_page: 100,
+            });
+            const linked = timeline
+              .filter((e) => e.event === 'cross-referenced' && e.source?.issue?.pull_request &&
+                e.source.issue.repository?.full_name === `${owner}/${repo}`)
+              .map((e) => ({ ...e.source.issue, merged_at: e.source.issue.pull_request.merged_at }));
+            const { data: closed } = await github.rest.pulls.list({
+              owner, repo, state: 'closed', sort: 'updated', direction: 'desc', per_page: 100,
+            });
+            const merged = closed.filter((p) => p.merged_at && p.merged_at >= issue.created_at);
+            const { checkPrompt } = require(`${process.env.LAUREL_LIB}/check.js`);
+            core.setOutput('prompt', checkPrompt({ issue, comments, linked, merged }));
+            core.setOutput('ok', 'true');
+
+      - name: Run Laurel check
+        id: check
+        if: steps.gather.outputs.ok == 'true'
+        timeout-minutes: 25
+        uses: anthropics/claude-code-action@d535f5172dec02b204866b393d6b20b9b2aaf98d # v1.0.266
+        with:
+          github_token: ${{ steps.app.outputs.token }}
+          anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
+          bot_name: bloomfield-laurel[bot]
+          bot_id: '352642980'
+          # The action adds git write tools to every mode; deny wins over allow, so the check stays read-only.
+          settings: '{"permissions":{"deny":["WebFetch","WebSearch","Bash(git add:*)","Bash(git commit:*)","Bash(git rm:*)","Bash(git push:*)","Bash(*git-push.sh*)"]}}'
+          show_full_output: ${{ github.event.repository.private }}
+          prompt: ${{ steps.gather.outputs.prompt }}
+          claude_args: >-
+            --model auto
+            --max-turns 30
+            --allowedTools "Read,Glob,Grep,Bash(git log:*),Bash(git show:*),Bash(git diff:*)"
+            --disallowedTools "Edit,Write,MultiEdit,NotebookEdit"
+            --append-system-prompt "You are Laurel, the Bloomfield Homes coding agent, checking whether an issue still needs doing. You cannot run tests, the app or any build tool. Work only with this repository's files and git history. Never quote secrets, credentials or personal data from the code."
+
+      - name: Post the verdict
+        if: always() && steps.gather.outputs.ok == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          EXECUTION_FILE: ${{ steps.check.outputs.execution_file }}
+          ACK_ID: ${{ steps.gather.outputs.ack }}
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const { resultText } = require(`${process.env.LAUREL_LIB}/stages.js`);
+            const { checkComment } = require(`${process.env.LAUREL_LIB}/check.js`);
+            const text = resultText(process.env.EXECUTION_FILE);
+            const body = text
+              ? checkComment(text)
+              : 'Laurel could not finish the check. Comment `/laurel check` to try again.';
+            await github.rest.issues.updateComment({ ...context.repo, comment_id: Number(process.env.ACK_ID), body });
