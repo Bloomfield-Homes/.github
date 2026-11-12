@@ -6,7 +6,8 @@
 # "/laurel split" on an oversize issue opens Laurel's proposed split as sub-issues (the `split` job). The size
 # comment that proposes a split carries <!-- laurel:split ... -->, so a client may offer a Split button too.
 # "/laurel check" on an issue asks whether it still needs doing (the `check` job). Laurel reads the code and
-# posts a verdict ending in <!-- laurel:check valid|partly|done|obsolete|unclear -->; it never edits or closes.
+# posts a verdict ending in <!-- laurel:check valid|partly|done|obsolete|unclear [met=1,3] -->; it never edits
+# or closes. "/laurel trim" (the `trim` job) then moves the met criteria into an "Already done" section.
 name: Laurel
 
 on:
@@ -35,7 +36,8 @@ jobs:
       (github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'laurel') ||
       (github.event_name == 'issue_comment' && github.event.sender.type == 'User' &&
         startsWith(github.event.comment.body, '/laurel') && !startsWith(github.event.comment.body, '/laurel split') &&
-        !(github.event.issue.pull_request == null && startsWith(github.event.comment.body, '/laurel check'))) ||
+        !(github.event.issue.pull_request == null && (startsWith(github.event.comment.body, '/laurel check') ||
+          startsWith(github.event.comment.body, '/laurel trim')))) ||
       (github.event_name == 'pull_request_review_comment' && github.event.sender.type == 'User' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         startsWith(github.event.comment.body, '/laurel')) ||
@@ -1223,3 +1225,70 @@ jobs:
               ? checkComment(text)
               : 'Laurel could not finish the check. Comment `/laurel check` to try again.';
             await github.rest.issues.updateComment({ ...context.repo, comment_id: Number(process.env.ACK_ID), body });
+
+  trim:
+    # A person's "/laurel trim" comment on an issue. Moves the criteria Laurel's latest check found met into an
+    # "Already done" section, so the issue lists only what is left. No code is checked out and no model runs.
+    if: >-
+      github.event_name == 'issue_comment' && github.event.sender.type == 'User' &&
+      github.event.issue.pull_request == null && startsWith(github.event.comment.body, '/laurel trim')
+    runs-on:
+      group: laurel
+      labels: [self-hosted, laurel]
+    timeout-minutes: 10
+    steps:
+      - name: Mint Laurel installation token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.LAUREL_APP_CLIENT_ID }}
+          private-key: ${{ secrets.LAUREL_APP_PRIVATE_KEY }}
+
+      - name: Fetch Laurel's scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Bloomfield-Homes/.github
+          ref: main
+          path: .laurel-scripts
+          sparse-checkout: laurel
+          persist-credentials: false
+
+      - name: Trim the met criteria
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const number = context.payload.issue.number;
+            const say = (body) => github.rest.issues.createComment({ owner, repo, issue_number: number, body });
+            const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner, repo, username: context.actor,
+            });
+            if (!['admin', 'write'].includes(perm.permission)) {
+              core.notice(`${context.actor} has ${perm.permission} access; trimming needs a person with write access.`);
+              return;
+            }
+            const { latestCheck, trimBody } = require(`${process.env.GITHUB_WORKSPACE}/.laurel-scripts/laurel/trim.js`);
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: number, per_page: 100,
+            });
+            const check = latestCheck(comments, 'bloomfield-laurel[bot]');
+            if (!check || check.verdict !== 'partly' || check.met.length === 0) {
+              await say('Laurel has no check on this issue that names met criteria. Comment `/laurel check` first.');
+              return;
+            }
+            // The live body, not the event's copy, so an edit made since the comment is kept.
+            const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number: number });
+            const { body, moved, left } = trimBody(issue.body, check.met, check.url);
+            if (moved.length === 0) {
+              await say("Laurel could not match its check to this issue's acceptance criteria, so it changed nothing. " +
+                'The issue may have changed since the check. Comment `/laurel check` to check it again.');
+              return;
+            }
+            if (left === 0) {
+              await say('Every acceptance criterion is met, so Laurel did not trim. Close the issue as completed instead.');
+              return;
+            }
+            await github.rest.issues.update({ owner, repo, issue_number: number, body });
+            await say(`Laurel moved ${moved.length} met criteria to "Already done". ${left} remain. ` +
+              "The issue's edit history has the old text.");

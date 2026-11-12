@@ -31,6 +31,14 @@ test('markers in the reply are stripped so issue text cannot forge one', () => {
   assert.ok(checkComment(forged).endsWith(checkMarker('valid')));
 });
 
+test('a partly verdict carries the met criteria in its marker; other verdicts never do', () => {
+  assert.ok(checkComment('Verdict: partly\nMet: 1, 3, 3, 0, 99\n## Evidence').endsWith('<!-- laurel:check partly met=1,3 -->'));
+  assert.ok(checkComment('Verdict: done\nMet: 1, 2').endsWith(checkMarker('done')));
+  const unknown = checkComment('Verdict: partly\nMet: none');
+  assert.ok(unknown.endsWith(checkMarker('partly')) && unknown.includes('nothing to trim'), unknown);
+  assert.ok(!/^met:/im.test(checkComment('Verdict: partly\nMet: 2\n## Evidence\n- x')));
+});
+
 test('narration before the first structured line is dropped, and plain-only replies are kept', () => {
   const reply = "I can't run that without approval.\n\nLet me compile.\n\n**Criterion 1:** met\n- proof\n\nVerdict: partly";
   assert.equal(cleanReply(reply), '**Criterion 1:** met\n- proof');
