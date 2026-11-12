@@ -1,6 +1,8 @@
 # Laurel: Bloomfield Homes coding agent. Repos opt in with one caller workflow. The model is the gateway
 # `auto` alias (triage uses `nvidia-super`). Plan: vault Local-Cowork/Plans/2026-11-04-laurel-github-claude-code-action.md
 # A person's "/laurel review" comment on a PR runs a read-only review instead of the coding agent.
+# "/laurel retry" on an issue reruns it from the start. A failure comment that ends with <!-- laurel:retry -->
+# can be retried as it stands, so a client may offer a button that posts that comment.
 name: Laurel
 
 on:
@@ -562,8 +564,8 @@ jobs:
               const blocked = s.blockedReason(text);
               if (blocked || !text.includes('## Files')) {
                 await say(`**Laurel could not plan this.** ${blocked || 'The planner returned no plan.'}\n\n` +
-                  '**Next:** edit the issue so the change can be planned from this repository, then remove and ' +
-                  're-add the `laurel` label.');
+                  '**Next:** edit the issue so the change can be planned from this repository, then comment ' +
+                  '`/laurel retry`.\n\n<!-- laurel:retry -->');
                 core.setOutput('stop', 'true');
                 return;
               }
@@ -620,7 +622,7 @@ jobs:
               : github.rest.issues.createComment({ ...context.repo, issue_number: issue.number, body });
             const stop = async (why) => {
               await say(`**Laurel did not build this.** ${why}\n\n**Next:** the plan is in the comment above. ` +
-                'Edit the issue to address this, then remove and re-add the `laurel` label.');
+                'Edit the issue to address this, then comment `/laurel retry`.\n\n<!-- laurel:retry -->');
               core.setOutput('stop', 'true');
             };
             const blocked = s.blockedReason(s.resultText(process.env.EXECUTION_FILE));
@@ -797,7 +799,7 @@ jobs:
                 body: 'Laurel finished without changing anything, so there is no PR. This usually means the issue ' +
                   `is already done on \`${base}\`. The [run log](${runUrl}) has Laurel's reasoning.\n\n` +
                   '**Next:** close the issue if it is done. Otherwise add what is missing to the issue, then ' +
-                  'remove and re-add the `laurel` label.',
+                  'comment `/laurel retry`.\n\n<!-- laurel:retry -->',
               });
               return;
             }
@@ -823,8 +825,10 @@ jobs:
                   `The "Push Laurel's branch" step in the [run log](${runUrl}) has the error.`;
               await github.rest.issues.createComment({
                 owner, repo, issue_number: number,
-                body: `${what}\n\n**To retry:** ${pushed ? `delete \`${head}\`, then ` : ''}remove and re-add the ` +
-                  '`laurel` label. If it fails the same way again, report it with a link to the run.',
+                // The marker offers a one-click retry, so it is left off when the branch must be deleted first.
+                body: `${what}\n\n**To retry:** ${pushed ? `delete \`${head}\`, then ` : ''}comment \`/laurel retry\`. ` +
+                  'If it fails the same way again, report it with a link to the run.' +
+                  (pushed ? '' : '\n\n<!-- laurel:retry -->'),
               });
               core.setFailed(pushed ? 'Laurel branch shares no history with the base' : 'Laurel branch was not pushed');
               return;
@@ -946,8 +950,9 @@ jobs:
               if (process.env.LAUREL_REVIEW === 'true') next = 'Comment `/laurel review` to try again.';
               else if (isPr) next = 'Comment `/laurel` with what still needs fixing to try again.';
               else next = 'Any commits it made are on its branch, in a draft PR if one opened. If the issue asks for ' +
-                'several changes, split it; otherwise remove and re-add the `laurel` label to retry.';
-              const note = `**Laurel did not finish.** ${why}\n\n**Next:** ${next}\n\n[Run log](${runUrl})`;
+                'several changes, split it; otherwise comment `/laurel retry`.';
+              const note = `**Laurel did not finish.** ${why}\n\n**Next:** ${next}\n\n[Run log](${runUrl})` +
+                (isPr || process.env.LAUREL_REVIEW === 'true' ? '' : '\n\n<!-- laurel:retry -->');
 
               if (tracking) {
                 const marker = "Laurel runs on Bloomfield Homes' local model.";
