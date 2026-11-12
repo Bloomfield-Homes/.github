@@ -84,6 +84,11 @@ jobs:
           build-args: |
             ${{ inputs.build-args }}
             SOURCE_COMMIT=${{ inputs.sha }}
+
+          # BuildKit secrets stay out of image layers. A line is emitted only when
+          # the caller has the secret, since the action warns on an empty value.
+          secrets: |
+            ${{ secrets.POSTHOG_CLI_API_KEY && format('posthog_cli_api_key={0}', secrets.POSTHOG_CLI_API_KEY) || '' }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: |
