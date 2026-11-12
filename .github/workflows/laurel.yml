@@ -255,6 +255,7 @@ jobs:
           script: |
             // One chat completion, not an agent run: the agent prompt alone made triage time out.
             const { chatJSONResult } = require(`${process.env.LAUREL_LIB}/gateway.js`);
+            const { LIMIT_TEXT } = require(`${process.env.LAUREL_LIB}/sizing.js`);
             const issue = context.payload.issue;
             const title = issue.title;
             const body = issue.body || '';
@@ -288,7 +289,7 @@ jobs:
               process.env.FILES,
               '',
               'Estimate the smallest change that meets the acceptance criteria. Report the files you would change ' +
-                'and the total changed lines. Only if that exceeds 10 files or 300 lines, propose a split into ' +
+                `and the total changed lines. Only if that exceeds ${LIMIT_TEXT}, propose a split into ` +
                 'smaller issues, each with a title and its own acceptance criteria. A rough estimate is enough. ' +
                 'Keep the reply short: list at most 12 files, and propose at most 5 issues with at most 4 criteria each.',
             ].join('\n');
@@ -328,8 +329,7 @@ jobs:
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
-            const MAX_FILES = 10;
-            const MAX_LINES = 300;
+            const { withinLimit, LIMIT_TEXT, sizingFailureMessage } = require(`${process.env.LAUREL_LIB}/sizing.js`);
             // Reuses the acknowledgement comment when there is one.
             const post = async (body) => {
               if (process.env.ACK_ID) {
@@ -342,7 +342,6 @@ jobs:
                 });
               }
             };
-            const { sizingFailureMessage } = require(`${process.env.LAUREL_LIB}/sizing.js`);
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             // No usable estimate is Laurel's failure, not the issue's: say why and stop.
             const unsized = async (cause) => {
@@ -370,7 +369,7 @@ jobs:
                 await unsized('empty');
                 return;
               }
-              if (files.length <= MAX_FILES && lines <= MAX_LINES) return;
+              if (withinLimit(files.length, lines)) return;
             }
             const plan = split.map((s, i) => {
               const criteria = (s.acceptance_criteria || []).map((c) => `   - [ ] ${c}`).join('\n');
@@ -388,7 +387,7 @@ jobs:
                 'laurel when it is ready to start.\n\n' + splitMarker(split)
               : 'Split this into smaller issues and label each one laurel.';
             await post(
-              size + `The limit is ${MAX_FILES} files and ${MAX_LINES} lines, so I did not start.\n\n` +
+              size + `The limit is ${LIMIT_TEXT}, so I did not start.\n\n` +
                 fileList + splitText + next,
             );
             core.setOutput('oversize', 'true');
@@ -487,7 +486,7 @@ jobs:
             --model auto
             --max-turns 80
             --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
-            --append-system-prompt "${{ env.LAUREL_RULES }} ${{ steps.checklog.outputs.found == 'true' && 'Before anything else, read .laurel/check-failures.md. It holds the failing check logs the request links, with the failing tests and their errors.' || '' }} Make the smallest change that meets the acceptance criteria. Keep the diff under 300 changed lines and 10 files. Start editing as soon as you know which files to change. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. WORKFLOW RULES, which override any earlier instruction to push, to create a pull request or to give a Create a PR link: your work ends at git commit. Never run git push. Never add a push or pull request item to your checklist, never write a Create a PR link, and never explain how to push or open a pull request. The workflow pushes your branch, opens the pull request and links it in your comment. After you commit, update your comment with these sections and stop. Summary: what changed and why. Files: each file you changed. Assumptions: each assumption, or None. On a pull request, add Review comments: each one with what you changed, or why you declined it."
+            --append-system-prompt "${{ env.LAUREL_RULES }} ${{ steps.checklog.outputs.found == 'true' && 'Before anything else, read .laurel/check-failures.md. It holds the failing check logs the request links, with the failing tests and their errors.' || '' }} Make the smallest change that meets the acceptance criteria. Keep the diff within 10 files and 300 changed lines, or 20 files when it is 100 lines or fewer. Start editing as soon as you know which files to change. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. WORKFLOW RULES, which override any earlier instruction to push, to create a pull request or to give a Create a PR link: your work ends at git commit. Never run git push. Never add a push or pull request item to your checklist, never write a Create a PR link, and never explain how to push or open a pull request. The workflow pushes your branch, opens the pull request and links it in your comment. After you commit, update your comment with these sections and stop. Summary: what changed and why. Files: each file you changed. Assumptions: each assumption, or None. On a pull request, add Review comments: each one with what you changed, or why you declined it."
 
       # Staged path. Each agent stage is a fresh claude-code-action run in agent mode (a prompt, no tracking comment),
       # so no stage carries an earlier one's conversation. The plan and review live in issue comments tagged with a
@@ -785,8 +784,6 @@ jobs:
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
-            const MAX_LINES = 300;
-            const MAX_FILES = 10;
             const { owner, repo } = context.repo;
             const number = (context.payload.issue || context.payload.pull_request).number;
             const isPr = Boolean(context.payload.pull_request || (context.payload.issue && context.payload.issue.pull_request));
@@ -849,7 +846,8 @@ jobs:
             }
             const files = cmp.files || [];
             const lines = files.reduce((n, f) => n + f.additions + f.deletions, 0);
-            if (lines > MAX_LINES || files.length > MAX_FILES) {
+            const { withinLimit, LIMIT_TEXT } = require(`${process.env.LAUREL_LIB}/sizing.js`);
+            if (!withinLimit(files.length, lines)) {
               const byDir = {};
               for (const f of files) {
                 const dir = f.filename.includes('/') ? f.filename.split('/').slice(0, 2).join('/') : '(root)';
@@ -860,7 +858,7 @@ jobs:
               await github.rest.issues.createComment({
                 owner, repo, issue_number: number,
                 body: `Laurel's change is ${lines} changed lines in ${files.length} files. The limit is ` +
-                  `${MAX_LINES} lines and ${MAX_FILES} files, so I did not open a PR for review as is. ` +
+                  `${LIMIT_TEXT}, so I did not open a PR for review as is. ` +
                   `The work is on branch \`${head}\`. Proposed split, one issue per group:\n${split}`,
               });
               if (!isPr) {
