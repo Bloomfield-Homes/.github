@@ -293,8 +293,9 @@ jobs:
               system: 'You size GitHub issues for a coding agent. Reply with JSON only, matching the schema.',
               prompt,
               schema,
-              // The reply is a short object, so a runaway reply stops fast.
-              maxTokens: 2000,
+              // The reply is a short object, but nvidia-super's reasoning counts against the cap and runs past
+              // 2,000 tokens on large prompts, leaving no reply. 8,000 covers that and still stops a runaway.
+              maxTokens: 8000,
               log: core,
             });
             if (!estimate) {
