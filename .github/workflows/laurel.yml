@@ -3,6 +3,8 @@
 # A person's "/laurel review" comment on a PR runs a read-only review instead of the coding agent.
 # "/laurel retry" on an issue reruns it from the start. A failure comment that ends with <!-- laurel:retry -->
 # can be retried as it stands, so a client may offer a button that posts that comment.
+# "/laurel split" on an oversize issue opens Laurel's proposed split as sub-issues (the `split` job). The size
+# comment that proposes a split carries <!-- laurel:split ... -->, so a client may offer a Split button too.
 name: Laurel
 
 on:
@@ -30,7 +32,7 @@ jobs:
     if: >-
       (github.event_name == 'issues' && github.event.action == 'labeled' && github.event.label.name == 'laurel') ||
       (github.event_name == 'issue_comment' && github.event.sender.type == 'User' &&
-        startsWith(github.event.comment.body, '/laurel')) ||
+        startsWith(github.event.comment.body, '/laurel') && !startsWith(github.event.comment.body, '/laurel split')) ||
       (github.event_name == 'pull_request_review_comment' && github.event.sender.type == 'User' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         startsWith(github.event.comment.body, '/laurel')) ||
@@ -376,10 +378,15 @@ jobs:
               : 'Laurel judged this too broad for one PR. ';
             const fileList = files.length > 0 ? `Files:\n${files.map((f) => `- \`${f}\``).join('\n')}\n\n` : '';
             const splitText = plan ? `Proposed split:\n${plan}\n\n` : '';
+            // The marker lets "/laurel split", or a client button that posts it, open the parts as sub-issues.
+            const { splitMarker } = require(`${process.env.LAUREL_LIB}/split.js`);
+            const next = plan
+              ? 'Comment `/laurel split` to open these as sub-issues of this one, then label each part ' +
+                'laurel when it is ready to start.\n\n' + splitMarker(split)
+              : 'Split this into smaller issues and label each one laurel.';
             await post(
               size + `The limit is ${MAX_FILES} files and ${MAX_LINES} lines, so I did not start.\n\n` +
-                fileList + splitText +
-                'Open these as separate issues and label each one laurel.',
+                fileList + splitText + next,
             );
             core.setOutput('oversize', 'true');
 
@@ -1009,3 +1016,67 @@ jobs:
             } catch (e) {
               core.warning(`Could not tidy Laurel's comments: ${e.message}`);
             }
+
+  split:
+    # A person's "/laurel split" comment on an issue opens Laurel's proposed split as sub-issues. No code is
+    # checked out and no model runs. The parts are left unlabelled, since later parts often build on earlier ones.
+    if: >-
+      github.event_name == 'issue_comment' && github.event.sender.type == 'User' &&
+      github.event.issue.pull_request == null && startsWith(github.event.comment.body, '/laurel split')
+    runs-on:
+      group: laurel
+      labels: [self-hosted, laurel]
+    timeout-minutes: 10
+    steps:
+      - name: Mint Laurel installation token
+        id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.LAUREL_APP_CLIENT_ID }}
+          private-key: ${{ secrets.LAUREL_APP_PRIVATE_KEY }}
+
+      - name: Fetch Laurel's scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Bloomfield-Homes/.github
+          ref: main
+          path: .laurel-scripts
+          sparse-checkout: laurel
+          persist-credentials: false
+
+      - name: Open the split as sub-issues
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const parent = context.payload.issue.number;
+            const say = (body) => github.rest.issues.createComment({ owner, repo, issue_number: parent, body });
+            const { data: perm } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner, repo, username: context.actor,
+            });
+            if (!['admin', 'write'].includes(perm.permission)) {
+              core.notice(`${context.actor} has ${perm.permission} access; splitting needs a person with write access.`);
+              return;
+            }
+            const { latestSplit, openSplit } = require(`${process.env.GITHUB_WORKSPACE}/.laurel-scripts/laurel/split.js`);
+            const { data: existing } = await github.request('GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues', {
+              owner, repo, issue_number: parent,
+            });
+            if (existing.length > 0) {
+              await say('This issue already has sub-issues, so Laurel did not split it again.');
+              return;
+            }
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: parent, per_page: 100,
+            });
+            const parts = latestSplit(comments, 'bloomfield-laurel[bot]');
+            if (!parts) {
+              await say('Laurel has no proposed split on this issue. Comment `/laurel retry` to size it again.');
+              return;
+            }
+            const opened = await openSplit({ github, owner, repo, parent, parts });
+            await say(
+              `Laurel opened ${opened.map((n) => `#${n}`).join(', ')} as sub-issues of this one. ` +
+                'Label each part `laurel` when it is ready to start; later parts may build on earlier ones.',
+            );
