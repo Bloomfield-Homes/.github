@@ -6,6 +6,9 @@ const fs = require('fs');
 
 const DIFF_LIMIT = 60000; // characters of diff sent to the reviewer
 const BLOCKED = /^BLOCKED:\s*(.+)$/m;
+const DONE = /^DONE:\s*(.+)$/m;
+const DONE_RULE = 'If the default branch already meets every acceptance criterion, change nothing and reply with ' +
+  'one line: DONE: <the file and code that already meets them>.';
 
 /** A short hash of the issue body. An edited issue gets a new revision, so earlier stage output stops matching. */
 function issueRev(body) {
@@ -45,6 +48,16 @@ function blockedReason(text) {
   return m ? m[1].trim() : null;
 }
 
+/** The evidence when an agent found the issue already done, else null. */
+function doneReason(text) {
+  const m = (text || '').match(DONE);
+  return m ? m[1].trim() : null;
+}
+
+function doneComment(evidence) {
+  return `**Laurel found this already done.** ${evidence}\n\n**Next:** close this issue.`;
+}
+
 function issueBlock(issue) {
   return `Issue #${issue.number}: ${issue.title}\n\n${issue.body || ''}`;
 }
@@ -65,6 +78,7 @@ function planPrompt({ issue, files }) {
     '## Criteria met: each acceptance criterion the change meets.',
     `## Criteria skipped: each criterion that needs ${UNREACHABLE}, and why.`,
     'If the change cannot be planned from this repository, reply with one line: BLOCKED: <reason>.',
+    DONE_RULE,
   ].join('\n');
 }
 
@@ -78,7 +92,7 @@ function buildPrompt({ issue, plan }) {
     'You are the build stage. Make exactly the change in the plan, commit it to the current branch, and stop. ' +
       'Read only the files the plan names and files they directly import. If the plan is wrong or cannot be ' +
       'followed, do not explore: reply with one line, BLOCKED: <reason>. Otherwise reply with Summary, Files ' +
-      'and Assumptions sections.',
+      'and Assumptions sections. ' + DONE_RULE,
   ].join('\n');
 }
 
@@ -154,6 +168,6 @@ function formatReview(review) {
 }
 
 module.exports = {
-  issueRev, marker, findStage, stageComment, resultText, blockedReason,
+  issueRev, marker, findStage, stageComment, resultText, blockedReason, doneReason, doneComment, DONE_RULE,
   planPrompt, buildPrompt, fixPrompt, reviewPrompt, REVIEW_SCHEMA, REVIEW_SYSTEM, needsFix, formatReview,
 };
