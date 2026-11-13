@@ -40,6 +40,15 @@ test('blockedReason finds a BLOCKED line anywhere in the answer', () => {
   assert.equal(s.blockedReason('## Files\napp.scss'), null);
 });
 
+test('doneReason finds a DONE line, and only plan and build offer it', () => {
+  assert.equal(s.doneReason('Checked.\nDONE: app_spec.rb already asserts it'), 'app_spec.rb already asserts it');
+  assert.equal(s.doneReason('## Files\napp.scss'), null);
+  assert.ok(s.planPrompt({ issue, files: 'a.rb' }).includes(s.DONE_RULE));
+  assert.ok(s.buildPrompt({ issue, plan: 'PLAN' }).includes(s.DONE_RULE));
+  assert.ok(!s.fixPrompt({ issue, plan: 'PLAN', review: 'R' }).includes(s.DONE_RULE));
+  assert.match(s.doneComment('x'), /close this issue/);
+});
+
 test('each prompt carries the issue, and later stages carry the plan', () => {
   for (const p of [s.planPrompt({ issue, files: 'a.rb' }), s.buildPrompt({ issue, plan: 'PLAN' }),
     s.fixPrompt({ issue, plan: 'PLAN', review: 'REVIEW' }), s.reviewPrompt({ issue, plan: 'PLAN', diff: 'DIFF' })]) {

@@ -488,7 +488,7 @@ jobs:
             --model auto
             --max-turns 80
             --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
-            --append-system-prompt "${{ env.LAUREL_RULES }} ${{ steps.checklog.outputs.found == 'true' && 'Before anything else, read .laurel/check-failures.md. It holds the failing check logs the request links, with the failing tests and their errors.' || '' }} Make the smallest change that meets the acceptance criteria. Keep the diff within 10 files and 300 changed lines, or 20 files when it is 100 lines or fewer. Start editing as soon as you know which files to change. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. WORKFLOW RULES, which override any earlier instruction to push, to create a pull request or to give a Create a PR link: your work ends at git commit. Never run git push. Never add a push or pull request item to your checklist, never write a Create a PR link, and never explain how to push or open a pull request. The workflow pushes your branch, opens the pull request and links it in your comment. After you commit, update your comment with these sections and stop. Summary: what changed and why. Files: each file you changed. Assumptions: each assumption, or None. On a pull request, add Review comments: each one with what you changed, or why you declined it."
+            --append-system-prompt "${{ env.LAUREL_RULES }} ${{ steps.checklog.outputs.found == 'true' && 'Before anything else, read .laurel/check-failures.md. It holds the failing check logs the request links, with the failing tests and their errors.' || '' }} Make the smallest change that meets the acceptance criteria. If the default branch already meets every acceptance criterion, change nothing and end your reply with one line: DONE: <the file and code that already meets them>. Keep the diff within 10 files and 300 changed lines, or 20 files when it is 100 lines or fewer. Start editing as soon as you know which files to change. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. WORKFLOW RULES, which override any earlier instruction to push, to create a pull request or to give a Create a PR link: your work ends at git commit. Never run git push. Never add a push or pull request item to your checklist, never write a Create a PR link, and never explain how to push or open a pull request. The workflow pushes your branch, opens the pull request and links it in your comment. After you commit, update your comment with these sections and stop. Summary: what changed and why. Files: each file you changed. Assumptions: each assumption, or None. On a pull request, add Review comments: each one with what you changed, or why you declined it."
 
       # Staged path. Each agent stage is a fresh claude-code-action run in agent mode (a prompt, no tracking comment),
       # so no stage carries an earlier one's conversation. The plan and review live in issue comments tagged with a
@@ -573,6 +573,12 @@ jobs:
             } else {
               const text = s.resultText(process.env.EXECUTION_FILE);
               const blocked = s.blockedReason(text);
+              const done = s.doneReason(text);
+              if (done) {
+                await say(s.doneComment(done));
+                core.setOutput('stop', 'true');
+                return;
+              }
               if (blocked || !text.includes('## Files')) {
                 await say(`**Laurel could not plan this.** ${blocked || 'The planner returned no plan.'}\n\n` +
                   '**Next:** edit the issue so the change can be planned from this repository, then comment ' +
@@ -636,7 +642,14 @@ jobs:
                 'Edit the issue to address this, then comment `/laurel retry`.\n\n<!-- laurel:retry -->');
               core.setOutput('stop', 'true');
             };
-            const blocked = s.blockedReason(s.resultText(process.env.EXECUTION_FILE));
+            const text = s.resultText(process.env.EXECUTION_FILE);
+            const done = s.doneReason(text);
+            if (done) {
+              await say(s.doneComment(done));
+              core.setOutput('stop', 'true');
+              return;
+            }
+            const blocked = s.blockedReason(text);
             if (blocked) return stop(`The builder stopped: ${blocked}`);
             const { stdout: count } = await exec.getExecOutput('git', ['rev-list', '--count', `${start}..HEAD`]);
             if (Number(count.trim()) === 0) return stop('The builder made no commits.');
@@ -783,6 +796,8 @@ jobs:
           REVIEW_MD: ${{ steps.stage_check.outputs.review_md }}
           FIX_RAN: ${{ steps.stage_fix.outcome != 'skipped' && steps.stage_fix.outcome != '' }}
           NO_COMMITS: ${{ steps.push.outputs.no_commits }}
+          STAGED_STOPPED: ${{ steps.staged.outputs.outcome == 'stopped' }}
+          EXECUTION_FILE: ${{ steps.laurel.outputs.execution_file }}
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
@@ -803,12 +818,16 @@ jobs:
             }
             const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
             if (process.env.NO_COMMITS === 'true') {
+              // A stopped staged run already said why in its live comment.
+              if (process.env.STAGED_STOPPED === 'true') return;
+              const s = require(`${process.env.LAUREL_LIB}/stages.js`);
+              const done = s.doneReason(s.resultText(process.env.EXECUTION_FILE));
               await github.rest.issues.createComment({
                 owner, repo, issue_number: number,
-                body: 'Laurel finished without changing anything, so there is no PR. This usually means the issue ' +
-                  `is already done on \`${base}\`. The [run log](${runUrl}) has Laurel's reasoning.\n\n` +
-                  '**Next:** close the issue if it is done. Otherwise add what is missing to the issue, then ' +
-                  'comment `/laurel retry`.\n\n<!-- laurel:retry -->',
+                body: done ? s.doneComment(done) :
+                  'Laurel finished without changing anything and did not say the issue is done, so there is no PR. ' +
+                  `The [run log](${runUrl}) has its reasoning.\n\n` +
+                  '**Next:** add what is missing to the issue, then comment `/laurel retry`.\n\n<!-- laurel:retry -->',
               });
               return;
             }
