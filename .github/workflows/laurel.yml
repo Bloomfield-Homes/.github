@@ -61,9 +61,9 @@ jobs:
       LAUREL_ISSUE: ${{ github.event_name == 'issues' || (github.event_name == 'issue_comment' && !github.event.issue.pull_request) }}
       # "true" for a Request changes review on Laurel's PR without /laurel, which the action needs as a prompt.
       LAUREL_AUTOFIX: ${{ github.event_name == 'pull_request_review' && github.event.review.state == 'changes_requested' && !startsWith(github.event.review.body, '/laurel') }}
-      # "true" for issue work in a repo named in the org variable LAUREL_STAGED_REPOS (comma-separated). Plan, build,
-      # review and fix then run as separate fresh agents, and the issue's comments carry state between them.
-      LAUREL_STAGED: ${{ (github.event_name == 'issues' || (github.event_name == 'issue_comment' && !github.event.issue.pull_request)) && contains(format(',{0},', vars.LAUREL_STAGED_REPOS), format(',{0},', github.event.repository.name)) }}
+      # "true" for all issue work. Plan, build, review and fix run as separate fresh agents, and the issue's comments
+      # carry state between them.
+      LAUREL_STAGED: ${{ github.event_name == 'issues' || (github.event_name == 'issue_comment' && !github.event.issue.pull_request) }}
       # Rules every coding agent gets, in both the single-session and the staged path.
       LAUREL_RULES: >-
         You are Laurel, the Bloomfield Homes coding agent. You cannot run tests, Ruby, Node or any build tool here;
