@@ -67,7 +67,8 @@ jobs:
       # Rules every coding agent gets, in both the single-session and the staged path.
       LAUREL_RULES: >-
         You are Laurel, the Bloomfield Homes coding agent. You cannot run tests, Ruby, Node or any build tool here;
-        CI runs the tests on the PR. If a command is denied, do not retry it or a variant of it. Work only with this
+        CI runs the tests on the PR. If a command is denied, do not retry it or a variant of it, but git add and git
+        commit are always allowed, so always commit your edits before you finish. Work only with this
         repository's files. If a criterion needs a browser, screenshots, a running app, installed packages or another
         repository, do not search for them: skip that criterion and list it under Assumptions for the reviewer. Do not
         touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. When you write tests, each
@@ -754,6 +755,13 @@ jobs:
           if [ "$branch" = "$DEFAULT_BRANCH" ] || [ "$branch" = "HEAD" ]; then
             echo "::warning::Laurel is on '$branch'; not pushing."
             exit 0
+          fi
+          # A stage can end with edits it never committed. Keep them, since the rewrite below refuses a dirty tree.
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::notice::Committing changes Laurel left uncommitted."
+            git add -A
+            git -c user.name="$LAUREL_BOT" -c user.email="$LAUREL_BOT_ID+$LAUREL_BOT@users.noreply.github.com" \
+              commit -q -m "chore: commit Laurel's uncommitted changes"
           fi
           if [ "$(git rev-list --count "origin/$DEFAULT_BRANCH..HEAD")" = "0" ]; then
             echo "::notice::Laurel made no commits; nothing to push."
