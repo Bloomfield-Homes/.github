@@ -76,8 +76,8 @@ jobs:
         add comments explaining the test framework. Follow the repository's CLAUDE.md or AGENTS.md conventions. Commit
         to the current branch with a subject of 50 characters or fewer. Never run git push; the workflow pushes your
         branch and opens the pull request.
-      # Bolt's slowest turns run past Claude Code's 10-minute request default, which aborts and retries them.
-      API_TIMEOUT_MS: '1200000'
+      # Bolt's slowest healthy turns take about 4 minutes. A call past 6 minutes has hung, so it aborts and retries.
+      API_TIMEOUT_MS: '360000'
       # Every model name is the gateway's auto alias, which overflows to a PII-screened cloud tier when the local GPU is full.
       ANTHROPIC_BASE_URL: ${{ vars.LAUREL_GATEWAY_URL }}
       ANTHROPIC_MODEL: auto
@@ -1124,7 +1124,7 @@ jobs:
       ANTHROPIC_DEFAULT_HAIKU_MODEL: auto
       ANTHROPIC_SMALL_FAST_MODEL: auto
       CLAUDE_CODE_SUBAGENT_MODEL: auto
-      API_TIMEOUT_MS: '1200000'
+      API_TIMEOUT_MS: '360000'
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
       DISABLE_TELEMETRY: '1'
       DISABLE_ERROR_REPORTING: '1'
