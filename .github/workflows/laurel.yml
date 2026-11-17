@@ -17,6 +17,9 @@ on:
         required: true
       LAUREL_GATEWAY_KEY:
         required: true
+      # Without it, or without vars.LAUREL_LENS_TRACES_URL, no traces are sent to Lens.
+      LAUREL_LENS_TRACING_KEY:
+        required: false
 
 # Callers must grant actions: read too; a reusable workflow cannot exceed its caller.
 permissions:
@@ -102,7 +105,27 @@ jobs:
       # The local model is not Anthropic: no beta headers, no prompt-cache marks.
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1'
       DISABLE_PROMPT_CACHING: '1'
+      # Lens tracing: one run is one trace, every Claude stage under the root span from "Start the Lens trace".
+      # Prompts and tool inputs are exported, so traces can hold buyer PII; Lens keeps them on-prem.
+      CLAUDE_CODE_ENABLE_TELEMETRY: '1'
+      CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: '1'
+      OTEL_TRACES_EXPORTER: ${{ secrets.LAUREL_LENS_TRACING_KEY && vars.LAUREL_LENS_TRACES_URL && 'otlp' || 'none' }}
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/json
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${{ vars.LAUREL_LENS_TRACES_URL }}
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Bearer ${{ secrets.LAUREL_LENS_TRACING_KEY }}
+      OTEL_LOG_USER_PROMPTS: '1'
+      OTEL_LOG_TOOL_DETAILS: '1'
+      OTEL_RESOURCE_ATTRIBUTES: >-
+        service.name=laurel-github-action,github.repository=${{ github.repository }},github.run_id=${{ github.run_id }},github.job=${{ github.job }},laurel.number=${{ github.event.issue.number || github.event.pull_request.number }}
     steps:
+      - name: Start the Lens trace
+        run: |
+          hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
+          echo "TRACEPARENT=00-$(hex 16)-$(hex 8)-01" >> "$GITHUB_ENV"
+          echo "LAUREL_TRACE_START_NS=$(date +%s%N)" >> "$GITHUB_ENV"
+
       - name: Note start time
         id: start
         run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
@@ -1101,6 +1124,35 @@ jobs:
               core.warning(`Could not tidy Laurel's comments: ${e.message}`);
             }
 
+      - name: Close the Lens trace
+        if: always() && env.OTEL_TRACES_EXPORTER == 'otlp' && env.LAUREL_TRACE_START_NS != ''
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          JOB_STATUS: ${{ job.status }}
+          LENS_KEY: ${{ secrets.LAUREL_LENS_TRACING_KEY }}
+        with:
+          script: &close-trace |
+            // The root span the stages' spans already point at. Its status follows the job.
+            const [, traceId, spanId] = process.env.TRACEPARENT.split('-');
+            const attr = (key, value) => ({ key, value: { stringValue: String(value) } });
+            const resource = process.env.OTEL_RESOURCE_ATTRIBUTES.split(',').map((kv) => attr(...kv.split('=')));
+            const span = {
+              traceId, spanId, name: `laurel.${context.job}`, kind: 1,
+              startTimeUnixNano: process.env.LAUREL_TRACE_START_NS, endTimeUnixNano: `${Date.now()}000000`,
+              status: { code: process.env.JOB_STATUS === 'success' ? 1 : 2, message: process.env.JOB_STATUS },
+              attributes: [
+                attr('github.event', context.eventName),
+                attr('github.run_url', `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`),
+              ],
+            };
+            const res = await fetch(process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${process.env.LENS_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ resourceSpans: [{ resource: { attributes: resource }, scopeSpans: [{ spans: [span] }] }] }),
+            });
+            if (!res.ok) core.warning(`Lens refused the run span: HTTP ${res.status}`);
+
   split:
     # A person's "/laurel split" comment on an issue opens Laurel's proposed split as sub-issues. No code is
     # checked out and no model runs. The parts are left unlabelled, since later parts often build on earlier ones.
@@ -1199,7 +1251,26 @@ jobs:
       ENABLE_CLAUDEAI_MCP_SERVERS: 'false'
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1'
       DISABLE_PROMPT_CACHING: '1'
+      # Lens tracing, as in the laurel job.
+      CLAUDE_CODE_ENABLE_TELEMETRY: '1'
+      CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: '1'
+      OTEL_TRACES_EXPORTER: ${{ secrets.LAUREL_LENS_TRACING_KEY && vars.LAUREL_LENS_TRACES_URL && 'otlp' || 'none' }}
+      OTEL_METRICS_EXPORTER: none
+      OTEL_LOGS_EXPORTER: none
+      OTEL_EXPORTER_OTLP_TRACES_PROTOCOL: http/json
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${{ vars.LAUREL_LENS_TRACES_URL }}
+      OTEL_EXPORTER_OTLP_TRACES_HEADERS: Authorization=Bearer ${{ secrets.LAUREL_LENS_TRACING_KEY }}
+      OTEL_LOG_USER_PROMPTS: '1'
+      OTEL_LOG_TOOL_DETAILS: '1'
+      OTEL_RESOURCE_ATTRIBUTES: >-
+        service.name=laurel-github-action,github.repository=${{ github.repository }},github.run_id=${{ github.run_id }},github.job=${{ github.job }},laurel.number=${{ github.event.issue.number }}
     steps:
+      - name: Start the Lens trace
+        run: |
+          hex() { od -An -tx1 -N"$1" /dev/urandom | tr -d ' \n'; }
+          echo "TRACEPARENT=00-$(hex 16)-$(hex 8)-01" >> "$GITHUB_ENV"
+          echo "LAUREL_TRACE_START_NS=$(date +%s%N)" >> "$GITHUB_ENV"
+
       - name: Mint Laurel installation token
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -1306,6 +1377,16 @@ jobs:
               ? checkComment(text)
               : 'Laurel could not finish the check. Comment `/laurel check` to try again.';
             await github.rest.issues.updateComment({ ...context.repo, comment_id: Number(process.env.ACK_ID), body });
+
+      - name: Close the Lens trace
+        if: always() && env.OTEL_TRACES_EXPORTER == 'otlp' && env.LAUREL_TRACE_START_NS != ''
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          JOB_STATUS: ${{ job.status }}
+          LENS_KEY: ${{ secrets.LAUREL_LENS_TRACING_KEY }}
+        with:
+          script: *close-trace
 
   trim:
     # A person's "/laurel trim" comment on an issue. Moves the criteria Laurel's latest check found met into an
