@@ -244,7 +244,7 @@ jobs:
           fetch-depth: ${{ env.LAUREL_REVIEW == 'true' && '0' || '1' }}
 
       - name: Fetch Laurel's scripts
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && (env.LAUREL_ISSUE == 'true' || env.LAUREL_CHECK_LOG == 'true')
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false')
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Public, so the default token reads it; Laurel's token is scoped to the calling repo.
@@ -255,7 +255,7 @@ jobs:
           persist-credentials: false
 
       - name: Move the scripts out of the workspace
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && (env.LAUREL_ISSUE == 'true' || env.LAUREL_CHECK_LOG == 'true')
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false')
         run: |
           # Outside the workspace, so no agent reads or commits them.
           mv .laurel-scripts/laurel "$RUNNER_TEMP/laurel-lib" && rm -rf .laurel-scripts
@@ -861,6 +861,7 @@ jobs:
           fi
 
           git push origin "HEAD:refs/heads/$branch"
+          echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Enforce small PRs and open the PR
         id: pr
@@ -1008,6 +1009,7 @@ jobs:
           EXECUTION_FILE: ${{ steps.review.outputs.execution_file || steps.laurel.outputs.execution_file || steps.staged.outputs.execution_file }}
           ACK_ID: ${{ steps.ack.outputs.comment_id }}
           PR_URL: ${{ steps.pr.outputs.pr_url }}
+          PUSHED_SHA: ${{ steps.push.outputs.sha }}
           FAILED_STAGE: ${{ steps.staged.outputs.stage }}
           PLAN_RETRIED: ${{ steps.plan_retry.outputs.retry }}
           # The staged path's plan and review for this issue revision stay visible across runs.
@@ -1081,15 +1083,17 @@ jobs:
                   body = body.replace(placeholder, result.result.trim());
                 }
 
-                // The action's own prompt tells the model to push and to link a PR it cannot open. The workflow
-                // does both, so drop that narration and link the real PR.
-                const pushTalk = /\b(unable|cannot|can't|not able|couldn't|could not)\b[^\n]*\bpush|\bcreate (the|a) PR\b|\bPR can be created\b|\bopen (the|a) (PR|pull request)\b/i;
-                body = body
-                  .replace(/^\s*[-*] \[[ xX]\] [^\n]*\b(create|open)\b[^\n]*\b(PR|pull request)\b[^\n]*\n?/gim, '')
-                  .replace(/^\s*[-*] \[ \] [^\n]*\bpush\b[^\n]*\n?/gim, '')
-                  .split(/\n{2,}/)
-                  .filter((p) => !pushTalk.test(p) && !p.includes(marker))
-                  .join('\n\n');
+                // The workflow pushes and opens the PR, so drop the model's narration of either and say what was pushed.
+                let scrub = (b) => b;
+                try {
+                  ({ scrubPushTalk: scrub } = require(`${process.env.LAUREL_LIB}/tidy.js`));
+                } catch (e) {
+                  core.info(`push-talk scrub unavailable: ${e.message}`);
+                }
+                body = scrub(body).split(/\n{2,}/).filter((p) => !p.includes(marker)).join('\n\n');
+                if (process.env.PUSHED_SHA && !body.includes(process.env.PUSHED_SHA)) {
+                  body += `\n\n**Pushed:** \`${process.env.PUSHED_SHA}\``;
+                }
                 if (process.env.PR_URL && !body.includes(process.env.PR_URL)) {
                   body += `\n\n**Pull request:** ${process.env.PR_URL}`;
                 }
