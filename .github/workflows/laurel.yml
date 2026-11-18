@@ -1009,6 +1009,7 @@ jobs:
           EXECUTION_FILE: ${{ steps.review.outputs.execution_file || steps.laurel.outputs.execution_file || steps.staged.outputs.execution_file }}
           ACK_ID: ${{ steps.ack.outputs.comment_id }}
           PR_URL: ${{ steps.pr.outputs.pr_url }}
+          PUSHED_SHA: ${{ steps.push.outputs.sha }}
           FAILED_STAGE: ${{ steps.staged.outputs.stage }}
           PLAN_RETRIED: ${{ steps.plan_retry.outputs.retry }}
           # The staged path's plan and review for this issue revision stay visible across runs.
