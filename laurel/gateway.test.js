@@ -1,9 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { chatJSON, chatJSONResult } = require('./gateway');
+const { chatJSON, chatJSONResult, BACKOFF_MS } = require('./gateway');
 
 const quiet = { warning() {}, info() {} };
-const base = { url: 'http://gw', key: 'k', model: 'm', system: 's', prompt: 'p', schema: {}, log: quiet };
+const base = { url: 'http://gw', key: 'k', model: 'm', system: 's', prompt: 'p', schema: {}, log: quiet, sleepImpl: async () => {} };
 const answer = (content, finishReason = 'stop') => async () => ({
   ok: true,
   json: async () => ({ model: 'm', choices: [{ finish_reason: finishReason, message: { content } }], usage: {} }),
