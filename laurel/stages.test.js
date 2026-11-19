@@ -87,7 +87,7 @@ test('chatJSON retries a failed attempt and returns the parsed reply', async () 
     if (r instanceof Error) throw r;
     return { ok: true, json: async () => r };
   };
-  const out = await chatJSON({ url: 'http://gw/', key: 'k', model: 'm', system: 's', prompt: 'p', schema: {}, log: quiet, fetchImpl });
+  const out = await chatJSON({ url: 'http://gw/', key: 'k', model: 'm', system: 's', prompt: 'p', schema: {}, log: quiet, fetchImpl, sleepImpl: async () => {} });
   assert.deepEqual(out, { ok: true });
   assert.equal(calls, 2);
 });
@@ -95,7 +95,7 @@ test('chatJSON retries a failed attempt and returns the parsed reply', async () 
 test('chatJSON gives up after its attempts', async () => {
   let calls = 0;
   const fetchImpl = async () => { calls += 1; return { ok: false, status: 503 }; };
-  const out = await chatJSON({ url: 'http://gw', key: 'k', model: 'm', system: 's', prompt: 'p', schema: {}, log: quiet, fetchImpl });
+  const out = await chatJSON({ url: 'http://gw', key: 'k', model: 'm', system: 's', prompt: 'p', schema: {}, log: quiet, fetchImpl, sleepImpl: async () => {} });
   assert.equal(out, null);
   assert.equal(calls, ATTEMPTS);
 });
