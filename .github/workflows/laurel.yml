@@ -31,7 +31,8 @@ permissions:
 # Read by the Bloomfield-Homes fork of claude-code-action for tracking comment text and spinner.
 env:
   AGENT_DISPLAY_NAME: Laurel
-  AGENT_SPINNER_URL: https://raw.githubusercontent.com/Bloomfield-Homes/claude-code-action/adbab32d985e283a3effa4f6bd582c8ac64b5ecb/assets/laurel-spinner.gif
+  AGENT_SPINNER_URL: https://raw.githubusercontent.com/Bloomfield-Homes/claude-code-action/da4504d49bc68584aeff87047d3a0f0ca76c9661/assets/laurel-spinner.png
+  AGENT_SPINNER_SIZE: 20px
 
 jobs:
   laurel:
@@ -497,7 +498,7 @@ jobs:
         id: laurel
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true' && env.LAUREL_STAGED != 'true' && steps.scope.outputs.oversize != 'true'
         timeout-minutes: 50
-        uses: Bloomfield-Homes/claude-code-action@adbab32d985e283a3effa4f6bd582c8ac64b5ecb # v1.0.266 + laurel branding
+        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
@@ -560,7 +561,7 @@ jobs:
         timeout-minutes: 25
         # The next step decides whether a failed plan is retried or fails the job.
         continue-on-error: true
-        uses: Bloomfield-Homes/claude-code-action@adbab32d985e283a3effa4f6bd582c8ac64b5ecb # v1.0.266 + laurel branding
+        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
@@ -603,7 +604,7 @@ jobs:
         id: stage_plan2
         if: ${{ !cancelled() && steps.plan_retry.outputs.retry == 'true' }}
         timeout-minutes: 25
-        uses: Bloomfield-Homes/claude-code-action@adbab32d985e283a3effa4f6bd582c8ac64b5ecb # v1.0.266 + laurel branding
+        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
@@ -674,7 +675,7 @@ jobs:
         id: stage_build
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.plan_record.outputs.stop != 'true'
         timeout-minutes: 30
-        uses: Bloomfield-Homes/claude-code-action@adbab32d985e283a3effa4f6bd582c8ac64b5ecb # v1.0.266 + laurel branding
+        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
@@ -756,7 +757,7 @@ jobs:
         timeout-minutes: 10
         # A failed fix still leaves the build's commits to push; the PR opens as a draft.
         continue-on-error: true
-        uses: Bloomfield-Homes/claude-code-action@adbab32d985e283a3effa4f6bd582c8ac64b5ecb # v1.0.266 + laurel branding
+        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
@@ -799,7 +800,7 @@ jobs:
         id: review
         if: steps.auth.outputs.ok == 'true' && env.LAUREL_REVIEW == 'true'
         timeout-minutes: 30
-        uses: Bloomfield-Homes/claude-code-action@adbab32d985e283a3effa4f6bd582c8ac64b5ecb # v1.0.266 + laurel branding
+        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
@@ -1352,7 +1353,7 @@ jobs:
         id: check
         if: steps.gather.outputs.ok == 'true'
         timeout-minutes: 25
-        uses: Bloomfield-Homes/claude-code-action@adbab32d985e283a3effa4f6bd582c8ac64b5ecb # v1.0.266 + laurel branding
+        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
