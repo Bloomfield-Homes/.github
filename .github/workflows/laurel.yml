@@ -32,7 +32,7 @@ permissions:
 env:
   AGENT_DISPLAY_NAME: Laurel
   AGENT_SPINNER_URL: https://raw.githubusercontent.com/Bloomfield-Homes/claude-code-action/da4504d49bc68584aeff87047d3a0f0ca76c9661/assets/laurel-spinner.png
-  AGENT_SPINNER_SIZE: 20px
+  AGENT_SPINNER_SIZE: 40px
 
 jobs:
   laurel:
