@@ -38,6 +38,7 @@ for _ in 1 2 3 4 5; do
   pgrep -u "$user" >/dev/null || break
   runuser -u "$user" -- pkill -KILL -u "$user" || true
 done
+if pgrep -u "$user" >/dev/null; then echo "laurel-check: $user processes survived the kill" >&2; exit 1; fi
 find "$home" -mindepth 1 -delete
 find /tmp /var/tmp /dev/shm -xdev -user "$user" -delete 2>/dev/null || true
 rm -rf /var/lib/laurel-check
