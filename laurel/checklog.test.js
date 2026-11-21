@@ -107,3 +107,16 @@ test('reads a log that arrives as an ArrayBuffer', async () => {
   const text = await checkLogContext({ github, owner: 'Org', repo: 'app', body: jobUrl, log: quiet });
   assert.match(text, /FAIL binary/);
 });
+
+test("skips Laurel's own failed jobs, linked by run or by job", async () => {
+  const jobs = [
+    { id: 7, name: 'laurel / laurel', workflow_name: 'Laurel', conclusion: 'failure' },
+    { id: 8, name: 'check', workflow_name: 'CI', conclusion: 'failure' },
+  ];
+  const github = fakeGithub({ jobs, logs: { 7: 'Error: denied', 8: 'FAIL src/b.test.ts' } });
+  const body = `${jobUrl} https://github.com/Org/app/actions/runs/43`;
+  const text = await checkLogContext({ github, owner: 'Org', repo: 'app', body, log: quiet });
+  assert.doesNotMatch(text, /Error: denied/);
+  assert.match(text, /FAIL src\/b\.test\.ts/);
+  assert.deepEqual(github.calls.filter(([kind]) => kind === 'log'), [['log', 8]]);
+});

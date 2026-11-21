@@ -45,15 +45,18 @@ function asText(data) {
   return typeof data === 'string' ? data : Buffer.from(data).toString('utf8');
 }
 
+// A failed Laurel job is a run that timed out, and its log is Laurel's own transcript, not a code failure.
+const notLaurel = (job) => job.workflow_name !== 'Laurel';
+
 async function failedJobs({ github, owner, repo, ref }) {
   if (ref.jobId) {
     const { data } = await github.rest.actions.getJobForWorkflowRun({ owner, repo, job_id: ref.jobId });
-    return [data];
+    return [data].filter(notLaurel);
   }
   const { data } = await github.rest.actions.listJobsForWorkflowRun({
     owner, repo, run_id: ref.runId, filter: 'latest', per_page: 100,
   });
-  return data.jobs.filter((job) => job.conclusion === 'failure').slice(0, MAX_JOBS);
+  return data.jobs.filter((job) => job.conclusion === 'failure' && notLaurel(job)).slice(0, MAX_JOBS);
 }
 
 /** Markdown with an excerpt per failed job the comment links in this repo, or '' when there are none. */

@@ -1,5 +1,6 @@
 # Laurel: Bloomfield Homes coding agent. Repos opt in with one caller workflow. The model is the gateway
-# `auto` alias (triage uses `nvidia-super`). Plan: vault Local-Cowork/Plans/2026-11-04-laurel-github-claude-code-action.md
+# `claude` alias, with `coder-haiku` for small fast calls (triage uses `nvidia-super`). A caller's check_commands
+# let Laurel run the repo's tests and lint through `laurel-check` (laurel/check-setup.sh), as a user with no tokens. Plan: vault Local-Cowork/Plans/2026-11-04-laurel-github-claude-code-action.md
 # A person's "/laurel review" comment on a PR runs a read-only review instead of the coding agent.
 # "/laurel retry" on an issue reruns it from the start. A failure comment that ends with <!-- laurel:retry -->
 # can be retried as it stands, so a client may offer a button that posts that comment.
@@ -12,6 +13,18 @@ name: Laurel
 
 on:
   workflow_call:
+    inputs:
+      # One "name: command" per line, for example "test: yarn test". A check named setup runs once before the agent.
+      check_commands:
+        type: string
+        default: ''
+      node_version:
+        type: string
+        default: ''
+      # Runs on one issue or PR in 24 hours before Laurel refuses to start, so a fix-fail loop stops by itself.
+      max_runs_per_day:
+        type: number
+        default: 6
     secrets:
       LAUREL_APP_PRIVATE_KEY:
         required: true
@@ -31,7 +44,7 @@ permissions:
 # Read by the Bloomfield-Homes fork of claude-code-action for tracking comment text and spinner.
 env:
   AGENT_DISPLAY_NAME: Laurel
-  AGENT_SPINNER_URL: https://raw.githubusercontent.com/Bloomfield-Homes/claude-code-action/da4504d49bc68584aeff87047d3a0f0ca76c9661/assets/laurel-spinner.png
+  AGENT_SPINNER_URL: https://raw.githubusercontent.com/Bloomfield-Homes/claude-code-action/37856aab963340d10d27bb1738ae606a58471cdd/assets/laurel-spinner.png
   AGENT_SPINNER_SIZE: 40px
 
 jobs:
@@ -58,7 +71,7 @@ jobs:
       group: laurel
       labels: [self-hosted, laurel]
     # Room for a second Plan try (25 min) on top of the stages' own limits.
-    timeout-minutes: 125
+    timeout-minutes: 150
     concurrency:
       group: laurel-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number }}
       cancel-in-progress: false
@@ -76,27 +89,35 @@ jobs:
       LAUREL_STAGED: ${{ github.event_name == 'issues' || (github.event_name == 'issue_comment' && !github.event.issue.pull_request) }}
       # Rules every coding agent gets, in both the single-session and the staged path.
       LAUREL_RULES: >-
-        You are Laurel, the Bloomfield Homes coding agent. You cannot run tests, Ruby, Node or any build tool here;
-        CI runs the tests on the PR. If a command is denied, do not retry it or a variant of it, but git add and git
-        commit are always allowed, so always commit your edits before you finish. Work only with this
-        repository's files. If a criterion needs a browser, screenshots, a running app, installed packages or another
-        repository, do not search for them: skip that criterion and list it under Assumptions for the reviewer. Do not
-        touch CI workflows, lockfiles, secrets or deploy files. Do not add dependencies. When you write tests, each
+        You are Laurel, the Bloomfield Homes coding agent. Work only with this repository's files. If a command is
+        denied, do not retry it or a variant of it; git add and git commit are always allowed, so always commit your
+        edits before you finish. If a criterion needs another repository, access you lack or a person's decision,
+        skip it and list it under Assumptions for the reviewer. Files under .laurel come from the workflow and are
+        never committed. When the change affects what a user sees, follow the repository's PR evidence rules, but
+        write the evidence block to .laurel/evidence.md instead of the description: an HTML comment that opens with
+        the line <!-- evidence, then lines such as page: /route | Button to click, expect: text the page must show,
+        or download: /route | Export > Download, then -->. The workflow puts that block in the pull request
+        description and CI captures the screenshots, so never ask a person to add screenshots. When asked to fix
+        failing checks, ignore a failed laurel check, which is an earlier Laurel run, and fix every other failing
+        check; an evidence check is fixed by writing .laurel/evidence.md. Never edit files under .github/workflows,
+        lockfiles, secrets or deploy files, and do not add dependencies. When you write tests, each
         assertion must fail if the behaviour it names breaks: never assert only that an object exists or is not nil,
         loop over data instead of repeating near-identical examples, name each example for what it asserts, and do not
         add comments explaining the test framework. Follow the repository's CLAUDE.md or AGENTS.md conventions. Commit
         to the current branch with a subject of 50 characters or fewer. Never run git push; the workflow pushes your
         branch and opens the pull request.
-      # Bolt's slowest healthy turns take about 4 minutes. A call past 6 minutes has hung, so it aborts and retries.
-      API_TIMEOUT_MS: '360000'
-      # Every model name is the gateway's auto alias, which overflows to a PII-screened cloud tier when the local GPU is full.
+      # A turn that writes a large file can take minutes; past 10 the call has hung, so it aborts and retries.
+      API_TIMEOUT_MS: '600000'
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: '8192'
+      # Gateway aliases: claude is Sonnet, coder-haiku serves small fast calls, role-coder runs subagents. The
+      # gateway screens prompts for buyer PII and caps spend per run and per month.
       ANTHROPIC_BASE_URL: ${{ vars.LAUREL_GATEWAY_URL }}
-      ANTHROPIC_MODEL: auto
-      ANTHROPIC_DEFAULT_OPUS_MODEL: auto
-      ANTHROPIC_DEFAULT_SONNET_MODEL: auto
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: auto
-      ANTHROPIC_SMALL_FAST_MODEL: auto
-      CLAUDE_CODE_SUBAGENT_MODEL: auto
+      ANTHROPIC_MODEL: claude
+      ANTHROPIC_DEFAULT_OPUS_MODEL: claude
+      ANTHROPIC_DEFAULT_SONNET_MODEL: claude
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: coder-haiku
+      ANTHROPIC_SMALL_FAST_MODEL: coder-haiku
+      CLAUDE_CODE_SUBAGENT_MODEL: role-coder
       # Egress off: telemetry, error reports, updates, feedback, feature flags, web fetch, connectors.
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
       DISABLE_TELEMETRY: '1'
@@ -108,9 +129,8 @@ jobs:
       CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: '1'
       CLAUDE_CODE_DISABLE_ARTIFACT: '1'
       ENABLE_CLAUDEAI_MCP_SERVERS: 'false'
-      # The local model is not Anthropic: no beta headers, no prompt-cache marks.
+      # The gateway can fall back to a model that is not Anthropic, which rejects beta headers.
       CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1'
-      DISABLE_PROMPT_CACHING: '1'
       # Lens tracing: one run is one trace, every Claude stage under the root span from "Start the Lens trace".
       # Prompts and tool inputs are exported, so traces can hold buyer PII; Lens keeps them on-prem.
       CLAUDE_CODE_ENABLE_TELEMETRY: '1'
@@ -267,16 +287,88 @@ jobs:
           mv .laurel-scripts/laurel "$RUNNER_TEMP/laurel-lib" && rm -rf .laurel-scripts
           echo "LAUREL_LIB=$RUNNER_TEMP/laurel-lib" >> "$GITHUB_ENV"
 
+      - name: Cap runs per day
+        id: cap
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false')
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          MAX_RUNS: ${{ inputs.max_runs_per_day }}
+          # Listing runs needs actions: read, which the workflow token has and the app token may not.
+          WORKFLOW_TOKEN: ${{ github.token }}
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            const { recentAttempts, capComment } = require(`${process.env.LAUREL_LIB}/attempts.js`);
+            const runs = getOctokit(process.env.WORKFLOW_TOKEN);
+            const { data: run } = await runs.rest.actions.getWorkflowRun({ ...context.repo, run_id: context.runId });
+            const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+            // Every review comment starts a run that skips, so a busy PR passes 100 runs a day.
+            const recent = await runs.paginate(runs.rest.actions.listWorkflowRuns, {
+              ...context.repo, workflow_id: run.workflow_id, created: `>=${since}`, per_page: 100,
+            });
+            const limit = Number(process.env.MAX_RUNS) || 6;
+            const count = recentAttempts(recent, { title: run.display_title, selfId: run.id });
+            core.info(`${count} earlier runs on "${run.display_title}" in 24 hours; the limit is ${limit}.`);
+            if (count < limit) return;
+            core.setOutput('stop', 'true');
+            const number = (context.payload.issue || context.payload.pull_request).number;
+            await github.rest.issues.createComment({ ...context.repo, issue_number: number, body: capComment(count, limit) });
+
+      - name: Prepare Laurel's notes folder
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false')
+        run: |
+          # The workflow and the agent pass files through .laurel; git never sees it.
+          mkdir -p .laurel
+          printf '\n.laurel/\n' >> .git/info/exclude
+
+      - name: Fetch the PR's screenshots
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && (github.event.issue.pull_request || github.event.pull_request)
+        continue-on-error: true
+        env:
+          NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+        run: |
+          # The evidence job keeps each PR's captures on pr-evidence/<number>; Laurel reads them to judge its UI work.
+          if git fetch -q --depth=1 origin "refs/heads/pr-evidence/$NUMBER" 2>/dev/null; then
+            mkdir -p .laurel/evidence
+            git archive FETCH_HEAD | tar -x -C .laurel/evidence
+            echo "LAUREL_NOTES=This pull request's before and after screenshots are in .laurel/evidence; read them to check UI work." >> "$GITHUB_ENV"
+          fi
+
+      - name: Set up Node for checks
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true' && inputs.check_commands != '' && inputs.node_version != ''
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Set up laurel-check
+        id: checks
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true' && inputs.check_commands != ''
+        timeout-minutes: 25
+        continue-on-error: true
+        env:
+          CHECK_COMMANDS: ${{ inputs.check_commands }}
+        run: |
+          sudo env CHECK_COMMANDS="$CHECK_COMMANDS" LAUREL_WS="$GITHUB_WORKSPACE" LAUREL_RUNNER_USER="$(id -un)" \
+            LAUREL_RUNNER_HOME="$HOME" NODE_BIN="$(command -v node || true)" bash "$LAUREL_LIB/check-setup.sh"
+          if grep -q '^setup:' /etc/laurel-check/commands; then
+            laurel-check setup
+          fi
+          names=$(cut -d: -f1 /etc/laurel-check/commands | grep -vx setup | paste -sd, -)
+          {
+            echo "LAUREL_CHECK_TOOL=,Bash(laurel-check:*)"
+            echo "LAUREL_CHECKS=Run the repository's checks with laurel-check followed by one name: $names. It runs on a copy of your working tree, so run the checks that cover your change before you commit and fix what they report. If a check fails for a reason unrelated to your change, say so under Assumptions."
+          } >> "$GITHUB_ENV"
+
       - name: List the repo files
         id: files
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_ISSUE == 'true'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true' && env.LAUREL_ISSUE == 'true'
         run: |
           # Handing triage the file list saves the turns it would spend exploring.
           { echo 'list<<LAUREL_FILES'; git ls-files | head -n 500; echo 'LAUREL_FILES'; } >> "$GITHUB_OUTPUT"
 
       - name: Size the work
         id: triage
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_ISSUE == 'true'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true' && env.LAUREL_ISSUE == 'true'
         timeout-minutes: 10
         continue-on-error: true
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -352,7 +444,7 @@ jobs:
 
       - name: Enforce the size limit
         id: scope
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_ISSUE == 'true'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true' && env.LAUREL_ISSUE == 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           TRIAGE: ${{ steps.triage.outputs.structured_output }}
@@ -426,7 +518,7 @@ jobs:
             core.setOutput('oversize', 'true');
 
       - name: Mark the issue in progress
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_ISSUE == 'true' && steps.scope.outputs.oversize != 'true'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true' && env.LAUREL_ISSUE == 'true' && steps.scope.outputs.oversize != 'true'
         continue-on-error: true
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -472,7 +564,7 @@ jobs:
 
       - name: Fetch failed check logs
         id: checklog
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_CHECK_LOG == 'true'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true' && env.LAUREL_CHECK_LOG == 'true'
         timeout-minutes: 3
         continue-on-error: true
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -489,16 +581,14 @@ jobs:
               return;
             }
             // In the workspace so the agent can read it, and excluded from git so it is never committed.
-            fs.mkdirSync('.laurel', { recursive: true });
             fs.writeFileSync('.laurel/check-failures.md', text);
-            fs.appendFileSync('.git/info/exclude', '\n.laurel/\n');
             core.setOutput('found', 'true');
 
       - name: Run Laurel
         id: laurel
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_REVIEW != 'true' && env.LAUREL_STAGED != 'true' && steps.scope.outputs.oversize != 'true'
-        timeout-minutes: 50
-        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true' && env.LAUREL_REVIEW != 'true' && env.LAUREL_STAGED != 'true' && steps.scope.outputs.oversize != 'true'
+        timeout-minutes: 60
+        uses: Bloomfield-Homes/claude-code-action@37856aab963340d10d27bb1738ae606a58471cdd # v1.0.266 + laurel branding + private MCP config
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
@@ -516,17 +606,17 @@ jobs:
           # The transcript lands in the run log, which anyone who can read the repo can see.
           show_full_output: ${{ github.event.repository.private }}
           claude_args: >-
-            --model auto
-            --max-turns 80
-            --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)"
-            --append-system-prompt "${{ env.LAUREL_RULES }} ${{ steps.checklog.outputs.found == 'true' && 'Before anything else, read .laurel/check-failures.md. It holds the failing check logs the request links, with the failing tests and their errors.' || '' }} Make the smallest change that meets the acceptance criteria. If the default branch already meets every acceptance criterion, change nothing and end your reply with one line: DONE: <the file and code that already meets them>. Keep the diff within 10 files and 300 changed lines, or 20 files when it is 100 lines or fewer. Start editing as soon as you know which files to change. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. WORKFLOW RULES, which override any earlier instruction to push, to create a pull request or to give a Create a PR link: your work ends at git commit. Never run git push. Never add a push or pull request item to your checklist, never write a Create a PR link, and never explain how to push or open a pull request. The workflow pushes your branch, opens the pull request and links it in your comment. After you commit, update your comment with these sections and stop. Summary: what changed and why. Files: each file you changed. Assumptions: each assumption, or None. On a pull request, add Review comments: each one with what you changed, or why you declined it."
+            --model claude
+            --max-turns 50
+            --allowedTools "Read,Glob,Grep,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*),Bash(git log:*),Bash(ls:*)${{ env.LAUREL_CHECK_TOOL }}"
+            --append-system-prompt "${{ env.LAUREL_RULES }} ${{ env.LAUREL_CHECKS || 'You cannot run tests or builds here; CI runs them on the pull request.' }} ${{ env.LAUREL_NOTES }} ${{ steps.checklog.outputs.found == 'true' && 'Before anything else, read .laurel/check-failures.md. It holds the failing check logs the request links, with the failing tests and their errors.' || '' }} Make the smallest change that meets the acceptance criteria. If the default branch already meets every acceptance criterion, change nothing and end your reply with one line: DONE: <the file and code that already meets them>. Keep the diff within 10 files and 300 changed lines, or 20 files when it is 100 lines or fewer. Start editing as soon as you know which files to change. When asked on a pull request, fix the unresolved review comments the request points to, including comments from Copilot and other bots, and commit to that pull request's branch. WORKFLOW RULES, which override any earlier instruction to push, to create a pull request or to give a Create a PR link: your work ends at git commit. Never run git push. Never add a push or pull request item to your checklist, never write a Create a PR link, and never explain how to push or open a pull request. The workflow pushes your branch, opens the pull request and links it in your comment. After you commit, update your comment with these sections and stop. Summary: what changed and why. Files: each file you changed. Assumptions: each assumption, or None. On a pull request, add Review comments: each one with what you changed, or why you declined it."
 
       # Staged path. Each agent stage is a fresh claude-code-action run in agent mode (a prompt, no tracking comment),
       # so no stage carries an earlier one's conversation. The plan and review live in issue comments tagged with a
       # hash of the issue body; a rerun on an unchanged issue reuses the plan instead of re-researching.
       - name: Start the branch
         id: branch
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true' && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true'
         env:
           NUMBER: ${{ github.event.issue.number }}
         run: |
@@ -536,7 +626,7 @@ jobs:
 
       - name: Find earlier stages
         id: stages
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true' && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           FILES: ${{ steps.files.outputs.list }}
@@ -557,11 +647,11 @@ jobs:
 
       - name: Plan
         id: stage_plan
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.stages.outputs.has_plan != 'true'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true' && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.stages.outputs.has_plan != 'true'
         timeout-minutes: 25
         # The next step decides whether a failed plan is retried or fails the job.
         continue-on-error: true
-        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
+        uses: Bloomfield-Homes/claude-code-action@37856aab963340d10d27bb1738ae606a58471cdd # v1.0.266 + laurel branding + private MCP config
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
@@ -571,7 +661,7 @@ jobs:
           show_full_output: ${{ github.event.repository.private }}
           prompt: ${{ steps.stages.outputs.plan_prompt }}
           claude_args: >-
-            --model auto
+            --model claude
             --max-turns 30
             --allowedTools "Read,Glob,Grep"
             --disallowedTools "Edit,Write,MultiEdit,NotebookEdit,Bash"
@@ -604,7 +694,7 @@ jobs:
         id: stage_plan2
         if: ${{ !cancelled() && steps.plan_retry.outputs.retry == 'true' }}
         timeout-minutes: 25
-        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
+        uses: Bloomfield-Homes/claude-code-action@37856aab963340d10d27bb1738ae606a58471cdd # v1.0.266 + laurel branding + private MCP config
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
@@ -614,7 +704,7 @@ jobs:
           show_full_output: ${{ github.event.repository.private }}
           prompt: ${{ steps.stages.outputs.plan_prompt }}
           claude_args: >-
-            --model auto
+            --model claude
             --max-turns 30
             --allowedTools "Read,Glob,Grep"
             --disallowedTools "Edit,Write,MultiEdit,NotebookEdit,Bash"
@@ -622,7 +712,7 @@ jobs:
 
       - name: Record the plan
         id: plan_record
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true' && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           EXECUTION_FILE: ${{ steps.stage_plan2.outputs.execution_file || steps.stage_plan.outputs.execution_file }}
@@ -673,9 +763,9 @@ jobs:
 
       - name: Build
         id: stage_build
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.plan_record.outputs.stop != 'true'
-        timeout-minutes: 30
-        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true' && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.plan_record.outputs.stop != 'true'
+        timeout-minutes: 45
+        uses: Bloomfield-Homes/claude-code-action@37856aab963340d10d27bb1738ae606a58471cdd # v1.0.266 + laurel branding + private MCP config
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
@@ -685,14 +775,14 @@ jobs:
           show_full_output: ${{ github.event.repository.private }}
           prompt: ${{ steps.plan_record.outputs.build_prompt }}
           claude_args: >-
-            --model auto
-            --max-turns 25
-            --allowedTools "Read,Edit,Write,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*)"
-            --append-system-prompt "${{ env.LAUREL_RULES }}"
+            --model claude
+            --max-turns 50
+            --allowedTools "Read,Edit,Write,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*)${{ env.LAUREL_CHECK_TOOL }}"
+            --append-system-prompt "${{ env.LAUREL_RULES }} ${{ env.LAUREL_CHECKS || 'You cannot run tests or builds here; CI runs them on the pull request.' }}"
 
       - name: Review the build
         id: stage_check
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.plan_record.outputs.stop != 'true'
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true' && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.plan_record.outputs.stop != 'true'
         timeout-minutes: 10
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -753,11 +843,11 @@ jobs:
 
       - name: Fix
         id: stage_fix
-        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.stage_check.outputs.needs_fix == 'true'
-        timeout-minutes: 10
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true' && env.LAUREL_STAGED == 'true' && steps.scope.outputs.oversize != 'true' && steps.stage_check.outputs.needs_fix == 'true'
+        timeout-minutes: 20
         # A failed fix still leaves the build's commits to push; the PR opens as a draft.
         continue-on-error: true
-        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
+        uses: Bloomfield-Homes/claude-code-action@37856aab963340d10d27bb1738ae606a58471cdd # v1.0.266 + laurel branding + private MCP config
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
@@ -767,10 +857,10 @@ jobs:
           show_full_output: ${{ github.event.repository.private }}
           prompt: ${{ steps.stage_check.outputs.fix_prompt }}
           claude_args: >-
-            --model auto
-            --max-turns 15
-            --allowedTools "Read,Edit,Write,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*)"
-            --append-system-prompt "${{ env.LAUREL_RULES }}"
+            --model claude
+            --max-turns 40
+            --allowedTools "Read,Edit,Write,Bash(git add:*),Bash(git commit:*),Bash(git status:*),Bash(git diff:*)${{ env.LAUREL_CHECK_TOOL }}"
+            --append-system-prompt "${{ env.LAUREL_RULES }} ${{ env.LAUREL_CHECKS || 'You cannot run tests or builds here; CI runs them on the pull request.' }}"
 
       - name: Sum up the stages
         id: staged
@@ -798,9 +888,9 @@ jobs:
 
       - name: Run Laurel review
         id: review
-        if: steps.auth.outputs.ok == 'true' && env.LAUREL_REVIEW == 'true'
+        if: steps.auth.outputs.ok == 'true' && steps.cap.outputs.stop != 'true' && env.LAUREL_REVIEW == 'true'
         timeout-minutes: 30
-        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
+        uses: Bloomfield-Homes/claude-code-action@37856aab963340d10d27bb1738ae606a58471cdd # v1.0.266 + laurel branding + private MCP config
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
@@ -810,7 +900,7 @@ jobs:
           # The action adds git write tools to every mode; deny wins over allow, so review stays read-only.
           settings: '{"permissions":{"deny":["WebFetch","WebSearch","Bash(git add:*)","Bash(git commit:*)","Bash(git rm:*)","Bash(git push:*)","Bash(*git-push.sh*)"]}}'
           claude_args: >-
-            --model auto
+            --model claude
             --max-turns 40
             --allowedTools "Read,Glob,Grep,Bash(git diff:*),Bash(git log:*),Bash(git status:*),Bash(git show:*),mcp__github_inline_comment__create_inline_comment,ToolSearch"
             --append-system-prompt "You are Laurel, the Bloomfield Homes code reviewer. Review this pull request's diff against its base branch. Do not edit files, commit or push. Report only real problems: bugs, security issues, missing error handling, broken tests, tests that cannot fail, and clear violations of the repository's own conventions. Skip style nits and praise. Post each finding as an inline comment on the exact line with what is wrong and a concrete fix. Then end with a short summary comment that lists the findings by severity, or says you found none. Never quote secrets, credentials or personal data from the code."
@@ -868,6 +958,29 @@ jobs:
 
           git push origin "HEAD:refs/heads/$branch"
           echo "sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Put Laurel's evidence block in the PR
+        if: always() && steps.auth.outputs.ok == 'true' && steps.laurel.outcome != 'skipped' && steps.laurel.outcome != '' && (github.event.issue.pull_request || github.event.pull_request)
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ steps.app.outputs.token }}
+          script: |
+            // The edit is made with the app token, so it starts the evidence job, which captures the screenshots.
+            const fs = require('fs');
+            const { evidenceBlock, mergeEvidence } = require(`${process.env.LAUREL_LIB}/evidence.js`);
+            if (!fs.existsSync('.laurel/evidence.md')) return;
+            const block = evidenceBlock(fs.readFileSync('.laurel/evidence.md', 'utf8'));
+            if (!block) {
+              core.warning('.laurel/evidence.md has no evidence block with a page: or download: route.');
+              return;
+            }
+            const number = (context.payload.issue || context.payload.pull_request).number;
+            const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: number });
+            const body = mergeEvidence(pr.body || '', block);
+            if (body === (pr.body || '')) return;
+            await github.rest.pulls.update({ ...context.repo, pull_number: number, body });
+            core.info(`Updated the evidence block on #${number}.`);
 
       - name: Enforce small PRs and open the PR
         id: pr
@@ -990,13 +1103,17 @@ jobs:
               ? `\n\n## Laurel review\n${process.env.REVIEW_MD}` +
                 (process.env.FIX_RAN === 'true' ? '\n\nLaurel ran one fix pass after this review.' : '')
               : '';
-            // An evidence block in the issue asks the repo's PR evidence job to capture screenshots and exports.
-            const block = ((issue.body || '').match(/<!--\s*evidence[ \t]*\r?\n[\s\S]*?-->/) || [''])[0];
+            // An evidence block asks the repo's PR evidence job to capture screenshots and exports. Laurel's own
+            // block in .laurel/evidence.md wins over one in the issue.
+            const { evidenceBlock } = require(`${process.env.LAUREL_LIB}/evidence.js`);
+            const fs = require('fs');
+            const written = fs.existsSync('.laurel/evidence.md') ? fs.readFileSync('.laurel/evidence.md', 'utf8') : '';
+            const block = evidenceBlock(written) || evidenceBlock(issue.body || '');
             const evidence = block ? `\n\n## Screenshots\n\n${block}\nCaptured by CI from this block.` : '';
             const { data: pr } = await github.rest.pulls.create({
               owner, repo, head, base,
               title: `Laurel: ${issue.title}`.slice(0, 120),
-              body: `${note}Closes #${issue.number}\n\nWritten by Laurel on the local model. A person must review and merge; Laurel never merges.${review}${evidence}`,
+              body: `${note}Closes #${issue.number}\n\nWritten by Laurel. A person must review and merge; Laurel never merges.${review}${evidence}`,
               ...(stopped ? { draft: true } : {}),
             });
             core.setOutput('pr_url', pr.html_url);
@@ -1353,7 +1470,7 @@ jobs:
         id: check
         if: steps.gather.outputs.ok == 'true'
         timeout-minutes: 25
-        uses: Bloomfield-Homes/claude-code-action@da4504d49bc68584aeff87047d3a0f0ca76c9661 # v1.0.266 + laurel branding
+        uses: Bloomfield-Homes/claude-code-action@37856aab963340d10d27bb1738ae606a58471cdd # v1.0.266 + laurel branding + private MCP config
         with:
           github_token: ${{ steps.app.outputs.token }}
           anthropic_api_key: ${{ secrets.LAUREL_GATEWAY_KEY }}
@@ -1365,7 +1482,7 @@ jobs:
           prompt: ${{ steps.gather.outputs.prompt }}
           # The first real check took 37 turns; the action fails a run that goes past the cap even when it finished.
           claude_args: >-
-            --model auto
+            --model claude
             --max-turns 60
             --allowedTools "Read,Glob,Grep,Bash(git log:*),Bash(git show:*),Bash(git diff:*)"
             --disallowedTools "Edit,Write,MultiEdit,NotebookEdit"
