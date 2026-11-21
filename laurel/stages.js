@@ -62,7 +62,8 @@ function issueBlock(issue) {
   return `Issue #${issue.number}: ${issue.title}\n\n${issue.body || ''}`;
 }
 
-const UNREACHABLE = 'a browser, screenshots, a running app, installed packages or another repository';
+// Screenshots are not on this list: CI captures them from the evidence block the build writes.
+const UNREACHABLE = "another repository, a person's decision or access Laurel lacks";
 
 function planPrompt({ issue, files }) {
   return [
@@ -77,6 +78,8 @@ function planPrompt({ issue, files }) {
     '## Changes: for each file, the exact change, specific enough to make without further reading.',
     '## Criteria met: each acceptance criterion the change meets.',
     `## Criteria skipped: each criterion that needs ${UNREACHABLE}, and why.`,
+    '## Evidence: when the change affects what a user sees, the evidence lines that show it (page: /route | ' +
+      'buttons to click, expect: text the page must show, download: /route | buttons), else None.',
     'If the change cannot be planned from this repository, reply with one line: BLOCKED: <reason>.',
     DONE_RULE,
   ].join('\n');
@@ -91,7 +94,9 @@ function buildPrompt({ issue, plan }) {
     '',
     'You are the build stage. Make exactly the change in the plan, commit it to the current branch, and stop. ' +
       'Read only the files the plan names and files they directly import. If the plan is wrong or cannot be ' +
-      'followed, do not explore: reply with one line, BLOCKED: <reason>. Otherwise reply with Summary, Files ' +
+      'followed, do not explore: reply with one line, BLOCKED: <reason>. When the plan has Evidence lines, write ' +
+      'them to .laurel/evidence.md inside an HTML comment that opens with the line <!-- evidence and closes with ' +
+      '-->. Unless blocked, reply with Summary, Files ' +
       'and Assumptions sections. ' + DONE_RULE,
   ].join('\n');
 }
