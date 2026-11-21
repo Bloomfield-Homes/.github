@@ -30,9 +30,20 @@ if [ -n "${NODE_BIN:-}" ]; then
   PATH=/opt/laurel-node/bin:$PATH corepack enable --install-directory /opt/laurel-node/bin
 fi
 
+# A runner can serve many jobs, so nothing an earlier job's checks left behind carries over: no processes, no
+# files in the check user's home, no work tree. The work tree sits in a root-owned parent, so the check user
+# cannot swap it for a symlink that root would then follow.
+# The runner has no CAP_KILL, so only the check user can kill its own processes.
+runuser -u "$user" -- pkill -KILL -u "$user" || true
+find "$home" -mindepth 1 -delete
+rm -rf /var/lib/laurel-check
+install -d -m 755 -o root -g root /var/lib/laurel-check
+install -d -m 700 -o "$user" -g "$user" /var/lib/laurel-check/work
+
 cat > /usr/local/libexec/laurel-check-root <<'EOF'
 #!/usr/bin/env bash
 # Runs one named check as laurelcheck. Only names in /etc/laurel-check/commands run; extra arguments are ignored.
+# Root never touches a path laurelcheck controls: cleanup and extraction run as laurelcheck.
 set -uo pipefail
 conf=/etc/laurel-check
 name="${1:-}"
@@ -45,17 +56,20 @@ if [ -z "$cmd" ]; then
   exit 2
 fi
 ws=$(cat "$conf/workspace")
-dest=/home/laurelcheck/work
-install -d -m 700 -o laurelcheck -g laurelcheck "$dest"
+dest=/var/lib/laurel-check/work
+as_check() { runuser -u laurelcheck -- env -i HOME=/home/laurelcheck LANG=C.UTF-8 CI=true \
+  PATH=/opt/laurel-node/bin:/usr/local/bin:/usr/bin:/bin COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "$@"; }
+# A process an earlier check left running could change this check's files or result.
+as_check pkill -KILL -u laurelcheck
 # node_modules survives between checks, so only the setup check installs dependencies.
-find "$dest" -mindepth 1 -maxdepth 1 ! -name node_modules -exec rm -rf {} +
-tar -C "$ws" --exclude=.git --exclude=.laurel --exclude=node_modules -cf - . |
-  runuser -u laurelcheck -- tar -C "$dest" -xf -
+as_check find "$dest" -mindepth 1 -maxdepth 1 ! -name node_modules -exec rm -rf {} +
+tar -C "$ws" --exclude=.git --exclude=.laurel --exclude=node_modules -cf - . | as_check tar -C "$dest" -xf -
 cd "$dest" || exit 1
 timeout 1200 runuser -u laurelcheck -- env -i HOME=/home/laurelcheck LANG=C.UTF-8 CI=true \
   PATH=/opt/laurel-node/bin:/usr/local/bin:/usr/bin:/bin COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
   bash -c "$cmd" 2>&1 | tail -n 300
 status=${PIPESTATUS[0]}
+as_check pkill -KILL -u laurelcheck
 [ "$status" = 124 ] && echo "laurel-check: '$name' ran past 20 minutes and was stopped."
 echo "laurel-check: $name exited $status"
 exit "$status"
