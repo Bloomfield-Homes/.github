@@ -33,9 +33,13 @@ fi
 # A runner can serve many jobs, so nothing an earlier job's checks left behind carries over: no processes, no
 # files in the check user's home, no work tree. The work tree sits in a root-owned parent, so the check user
 # cannot swap it for a symlink that root would then follow.
-# The runner has no CAP_KILL, so only the check user can kill its own processes.
-runuser -u "$user" -- pkill -KILL -u "$user" || true
+# The runner has no CAP_KILL, so only the check user can kill its own processes. Repeat in case one was forking.
+for _ in 1 2 3 4 5; do
+  pgrep -u "$user" >/dev/null || break
+  runuser -u "$user" -- pkill -KILL -u "$user" || true
+done
 find "$home" -mindepth 1 -delete
+find /tmp /var/tmp /dev/shm -xdev -user "$user" -delete 2>/dev/null || true
 rm -rf /var/lib/laurel-check
 install -d -m 755 -o root -g root /var/lib/laurel-check
 install -d -m 700 -o "$user" -g "$user" /var/lib/laurel-check/work
