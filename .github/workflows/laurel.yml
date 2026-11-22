@@ -298,7 +298,7 @@ jobs:
         with:
           github-token: ${{ steps.app.outputs.token }}
           script: |
-            const { recentAttempts, capComment } = require(`${process.env.LAUREL_LIB}/attempts.js`);
+            const { candidateRuns, startedRun, capComment } = require(`${process.env.LAUREL_LIB}/attempts.js`);
             const runs = getOctokit(process.env.WORKFLOW_TOKEN);
             const { data: run } = await runs.rest.actions.getWorkflowRun({ ...context.repo, run_id: context.runId });
             const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -307,12 +307,23 @@ jobs:
               ...context.repo, workflow_id: run.workflow_id, created: `>=${since}`, per_page: 100,
             });
             const limit = Number(process.env.MAX_RUNS) || 6;
-            const count = recentAttempts(recent, { title: run.display_title, selfId: run.id });
+            let count = 0;
+            for (const r of candidateRuns(recent, { title: run.display_title, selfId: run.id })) {
+              const jobs = await runs.paginate(runs.rest.actions.listJobsForWorkflowRun, {
+                ...context.repo, run_id: r.id, per_page: 100,
+              });
+              if (startedRun(jobs)) count += 1;
+            }
             core.info(`${count} earlier runs on "${run.display_title}" in 24 hours; the limit is ${limit}.`);
             if (count < limit) return;
             core.setOutput('stop', 'true');
             const number = (context.payload.issue || context.payload.pull_request).number;
             await github.rest.issues.createComment({ ...context.repo, issue_number: number, body: capComment(count, limit) });
+
+      - name: Laurel started
+        # The cap counts only runs that reached this step, so a run it refused does not count toward the next cap.
+        if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false') && steps.cap.outputs.stop != 'true'
+        run: echo "This run counts toward max_runs_per_day."
 
       - name: Prepare Laurel's notes folder
         if: steps.auth.outputs.ok == 'true' && (steps.gate.outputs.ok != 'false')

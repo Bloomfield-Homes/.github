@@ -1,17 +1,24 @@
 // A cap on Laurel runs per issue or PR, so a bot loop (fix, fail, fix again) stops on its own.
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+/** The workflow step a run reaches only when the cap let it start. Only runs that reached it count. */
+const STARTED_STEP = 'Laurel started';
 
 /**
- * How many earlier runs of this workflow worked on the same issue or PR in the last day. GitHub titles a run after
- * its issue or PR, so the title is the match. A skipped run (its job `if` was false) did no work and is not counted.
+ * Earlier runs of this workflow on the same issue or PR in the last day. GitHub titles a run after its issue or
+ * PR, so the title is the match. A skipped run (its job `if` was false) did no work and is left out.
  */
-function recentAttempts(runs, { title, selfId, now = Date.now() }) {
+function candidateRuns(runs, { title, selfId, now = Date.now() }) {
   const since = now - DAY_MS;
   return runs.filter((r) => r.id !== selfId &&
     r.display_title === title &&
     r.conclusion !== 'skipped' &&
-    Date.parse(r.created_at) >= since).length;
+    Date.parse(r.created_at) >= since);
+}
+
+/** Whether a run got past the cap, from its jobs. A run the cap refused never reaches STARTED_STEP. */
+function startedRun(jobs) {
+  return jobs.some((j) => (j.steps || []).some((s) => s.name === STARTED_STEP && s.conclusion === 'success'));
 }
 
 /** The comment that says Laurel stopped, with what a person can do about it. */
@@ -21,4 +28,4 @@ function capComment(count, limit) {
     'blocker by hand or edit the request, then try again tomorrow, or ask an admin to raise `max_runs_per_day`.';
 }
 
-module.exports = { recentAttempts, capComment };
+module.exports = { STARTED_STEP, candidateRuns, startedRun, capComment };
