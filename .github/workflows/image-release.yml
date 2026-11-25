@@ -102,6 +102,8 @@ jobs:
         env:
           APP_TYPE: ${{ inputs.app-type }}
           CHANNEL: ${{ inputs.channel }}
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ inputs.sha }}
           AZURE_URL: ${{ fromJSON(inputs.vars).DOKPLOY_AZURE_URL }}
           ONPREM_URL: ${{ fromJSON(inputs.vars).DOKPLOY_ONPREM_URL }}
           AZURE_KEY: ${{ secrets.DOKPLOY_AZURE_API_KEY }}
@@ -116,13 +118,19 @@ jobs:
             *) echo "::error::app-type must be compose or application"; exit 1 ;;
           esac
 
+          # Without a title Dokploy lists every deploy as "Manual deployment".
+          title="v$VERSION"
+          description="$(git log -1 --format=%s "$SHA") (${SHA:0:7})"
+
           deploy() {
             local name="$1" base="$2" key="$3" id="$4" body code
             if [ -z "$id" ] || [ -z "$base" ] || [ -z "$key" ]; then
               echo "::notice::$name is not fully configured (id, url or key empty); skipping"
               return 0
             fi
-            body="$(jq -cn --arg f "$id_field" --arg id "$id" '{($f): $id}')"
+            body="$(jq -cn --arg f "$id_field" --arg id "$id" \
+              --arg title "$title" --arg description "$description" \
+              '{($f): $id, title: $title, description: $description}')"
             code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST --max-time 60 \
               -H 'Content-Type: application/json' \
               -H "x-api-key: $key" \
