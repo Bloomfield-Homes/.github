@@ -22,7 +22,8 @@ jobs:
       github.event.action != 'closed' && github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       contains(github.event.pull_request.body, '<!-- evidence')
-    runs-on: ubuntu-latest
+    # setup-ruby has no Ruby 3.4.13 build for ubuntu-26.04 yet.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     concurrency:
       group: lots-evidence-${{ github.repository }}-${{ github.event.pull_request.number }}
